@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "atomicbi",
+  "description": "Claude Code plugins by Atomic BI — developer tools, workflow automation, and more",
+  "owner": {
+    "name": "Atomic BI"
+  },
+  "plugins": [
+    {
+      "name": "dev",
+      "description": "Developer workflow skills — session wrapup, and more to come",
+      "source": "./plugins/dev",
+      "category": "development",
+      "homepage": "https://github.com/atomicbi/claude-plugins"
+    }
+  ]
+}

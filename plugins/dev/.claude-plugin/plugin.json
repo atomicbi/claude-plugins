@@ -1,0 +1,11 @@
+{
+  "name": "dev",
+  "description": "Developer workflow skills — session wrapup, commit hygiene, and more",
+  "version": "1.0.0",
+  "author": {
+    "name": "Atomic BI"
+  },
+  "homepage": "https://github.com/atomicbi/claude-plugins",
+  "repository": "https://github.com/atomicbi/claude-plugins",
+  "license": "MIT"
+}
