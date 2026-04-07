@@ -13,13 +13,13 @@ A marketplace of Claude Code plugins by [Atomic BI](https://github.com/atomicbi)
 Add this marketplace to Claude Code:
 
 ```
-/plugin marketplace add atomicbi https://github.com/atomicbi/claude-plugins
+claude plugin marketplace add atomicbi/claude-plugins
 ```
 
 Then install any plugin:
 
 ```
-/plugin install dev@atomicbi
+claude plugin install dev@atomicbi
 ```
 
 Plugins auto-update when the marketplace is refreshed.
