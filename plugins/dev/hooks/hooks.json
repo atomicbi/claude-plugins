@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "if": "Bash(git commit)",
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gatekeeper.ts\"",
+            "timeout": 30,
+            "statusMessage": "Gatekeeper: checking for secrets and package hygiene"
+          },
+          {
+            "if": "Bash(git commit *)",
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gatekeeper.ts\"",
+            "timeout": 30,
+            "statusMessage": "Gatekeeper: checking for secrets and package hygiene"
+          },
+          {
+            "if": "Bash(npm publish)",
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gatekeeper.ts\"",
+            "timeout": 30,
+            "statusMessage": "Gatekeeper: checking for secrets and package hygiene"
+          },
+          {
+            "if": "Bash(npm publish *)",
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gatekeeper.ts\"",
+            "timeout": 30,
+            "statusMessage": "Gatekeeper: checking for secrets and package hygiene"
+          },
+          {
+            "if": "Bash(pnpm publish)",
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gatekeeper.ts\"",
+            "timeout": 30,
+            "statusMessage": "Gatekeeper: checking for secrets and package hygiene"
+          },
+          {
+            "if": "Bash(pnpm publish *)",
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gatekeeper.ts\"",
+            "timeout": 30,
+            "statusMessage": "Gatekeeper: checking for secrets and package hygiene"
+          }
+        ]
+      }
+    ]
+  }
+}

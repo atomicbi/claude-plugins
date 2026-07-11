@@ -1,0 +1,5 @@
+{
+  "type": "module",
+  "private": true,
+  "description": "Marks scripts/ as ES modules so node runs gatekeeper.ts without CJS-reparse overhead (also when installed from the plugin cache). Not an npm package."
+}

@@ -19,11 +19,12 @@ Structured wrap-up for coding sessions. Cleans up, validates, documents, commits
     ├── 1. CLEAN UP changed files
     ├── 2. VALIDATE (lint, typecheck, tests)
     ├── 3. QUALITY CHECK (roam, advisory)
-    ├── 4. UPDATE DOCS (if architectural changes)
-    ├── 5. COMMIT (meaningful message)
-    ├── 6. VERSION BUMP (if configured)
-    ├── 7. PUBLISH / PUSH (if configured)
-    └── 8. SUMMARY
+    ├── 4. SECURITY GATE (secrets + package contents)
+    ├── 5. UPDATE DOCS (if architectural changes)
+    ├── 6. COMMIT (meaningful message)
+    ├── 7. VERSION BUMP (if configured)
+    ├── 8. PUBLISH / PUSH (if configured)
+    └── 9. SUMMARY
 ```
 
 ## Init Flow
@@ -118,7 +119,18 @@ Use `roam-code` MCP if available:
 
 If roam-code is not available, leave a subtle suggestion to install it. If the user confirms, follow https://github.com/Cranot/roam-code/blob/main/skills/roam/SKILL.md
 
-### 4. Update Docs
+### 4. Security Gate
+
+Run the **gatekeeper** audit (see the `gatekeeper` skill in this plugin) before committing:
+
+1. **Secret scan**: no secrets in staged/outgoing changes; no sensitive files tracked in git (`.env`, `*.pem`, keys, credential JSON, `.npmrc`). Check `.gitignore` covers them.
+2. **Package contents** (only if this wrapup will publish): `npm pack --dry-run` per publishable package — the tarball must contain only build-relevant files (build output, `package.json`, README, LICENSE, type declarations). No `src/`, `docs/`, tests, `tsconfig*`, `*.tsbuildinfo`, `.mcp.json`, `.env*`, `CLAUDE.md`. Recommend a `files` whitelist in package.json if missing.
+
+Findings here are **blocking** — fix them (or get explicit user sign-off on false positives) before proceeding to commit. If a real secret was already committed, tell the user to rotate it; removing it from git does not un-leak it.
+
+Note: the dev plugin's gatekeeper hook re-runs a fast version of these checks automatically on `git commit` and `npm`/`pnpm publish`, so doing this step first avoids being blocked mid-commit.
+
+### 5. Update Docs
 
 Based on the configured `docs` strategy:
 
@@ -128,7 +140,7 @@ Based on the configured `docs` strategy:
 
 Only update docs for meaningful architectural or behavioral changes. Bug fixes and minor tweaks don't need doc updates. When in doubt, skip — don't create noise.
 
-### 5. Commit
+### 6. Commit
 
 - Stage all relevant files (including the user's changes if working alongside them)
 - Write a descriptive commit message: what changed and why, not just file names
@@ -136,7 +148,7 @@ Only update docs for meaningful architectural or behavioral changes. Bug fixes a
 - If there are logically separate changes, consider splitting into multiple commits
 - Include user's parallel changes unless they conflict or have issues
 
-### 6. Version Bump (if configured)
+### 7. Version Bump (if configured)
 
 Only when `version_bump: yes` in config:
 
@@ -149,7 +161,7 @@ Only when `version_bump: yes` in config:
 - Commit the version bump separately: `chore: bump version to X.Y.Z`
 - Tag: `vX.Y.Z`
 
-### 7. Publish / Push (if configured)
+### 8. Publish / Push (if configured)
 
 **Push** (when `push: yes`):
 - `git push` to the current branch's remote
@@ -159,7 +171,7 @@ Only when `version_bump: yes` in config:
 - Instead, tell the user: "Versions bumped and tagged. Run `! pnpm publish -r` to publish."
 - If the project has a publish script in package.json, suggest that instead
 
-### 8. Summary
+### 9. Summary
 
 End with a concise wrap-up summary:
 
@@ -167,6 +179,7 @@ End with a concise wrap-up summary:
 WRAPUP COMPLETE
 - Cleaned: 3 files (removed 2 console.logs, 1 unused import)
 - Checks: lint ✓ typecheck ✓ tests ✓
+- Security: no secrets ✓ package contents clean ✓
 - Quality: roam health 64% → 68% (advisory)
 - Docs: updated packages/core/docs/adapters.md
 - Committed: "feat: add vercel adapter with stateless sessions"

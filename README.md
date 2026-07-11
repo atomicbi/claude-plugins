@@ -6,7 +6,7 @@ A marketplace of Claude Code plugins by [Atomic BI](https://github.com/atomicbi)
 
 | Plugin | Description | Install |
 |--------|-------------|---------|
-| [dev](./plugins/dev) | Developer workflow skills — wrapup, and more | `/plugin install dev@atomicbi` |
+| [dev](./plugins/dev) | Developer workflow skills — wrapup, gatekeeper (secret-leak & package hygiene), and more | `/plugin install dev@atomicbi` |
 
 ## Setup
 
