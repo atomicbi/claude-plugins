@@ -1,0 +1,25 @@
+{
+  "name": "claude-plugins",
+  "description": "Atomic BI Claude Code plugin marketplace",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/atomicbi/claude-plugins",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atomicbi/claude-plugins.git"
+  },
+  "scripts": {
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "oxlint": "^1.73.0",
+    "typescript": "^7.0.2"
+  },
+  "packageManager": "pnpm@11.8.0"
+}
