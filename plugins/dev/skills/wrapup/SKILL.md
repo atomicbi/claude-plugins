@@ -61,6 +61,8 @@ RECOMMENDATIONS:
   - Note: pnpm publish requires browser auth — wrapup will
     bump + commit + tag, then prompt you to publish manually.
 - Smoke tests for frontend? [not set up — recommend adding]
+- Claude Co-Authored-By trailer in commits?
+  [disable for this repo (default) / disable globally / keep enabled]
 ```
 
 Wait for user confirmation before proceeding.
@@ -79,6 +81,7 @@ Add a `## Wrapup Config` section to the project's CLAUDE.md:
 - publish: yes (manual — prompt after tag)
 - docs: monorepo (per-package docs/ referenced in root CLAUDE.md)
 - frontend_smoke: no (or: follow docs/smoke-tests.md)
+- co_authored_by: no (or: yes / no (global))
 ```
 
 Keep this section concise. It is the single source of truth for wrapup behavior.
@@ -147,6 +150,22 @@ Only update docs for meaningful architectural or behavioral changes. Bug fixes a
 - Use conventional commit style if the project already uses it, otherwise write natural language
 - If there are logically separate changes, consider splitting into multiple commits
 - Include user's parallel changes unless they conflict or have issues
+
+#### Co-Authored-By trailer
+
+Controlled by `co_authored_by` in the Wrapup Config:
+
+- `co_authored_by: no` (or `no (global)`) — do NOT append the `Co-Authored-By: Claude ...` trailer to commit messages
+- `co_authored_by: yes` — keep the default trailer behavior
+
+If the key is **not set** in the Wrapup Config:
+
+1. Check `~/.claude/settings.json` first — if it already contains `"includeCoAuthoredBy": false`, silently record `co_authored_by: no (global)` in the Wrapup Config and move on (don't ask).
+2. Otherwise ask the user (before committing), with these options:
+   - **Disable for this repository** (default/recommended) → record `co_authored_by: no` in the Wrapup Config
+   - **Disable globally** → set `"includeCoAuthoredBy": false` in `~/.claude/settings.json` (merge into the existing JSON — never overwrite other keys) and record `co_authored_by: no (global)`
+   - **Keep enabled** → record `co_authored_by: yes`
+3. Persist the answer in the `## Wrapup Config` section so the question is asked at most once per project.
 
 ### 7. Version Bump (if configured)
 

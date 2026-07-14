@@ -46,3 +46,4 @@ See [docs/plugin-development.md](docs/plugin-development.md) for the full workfl
 - publish: no (distribution is git push; teammates update via `/plugin marketplace update`)
 - docs: docs/ folder, CLAUDE.md as index
 - frontend_smoke: no
+- co_authored_by: no (global)
