@@ -21,11 +21,27 @@ A PreToolUse hook on the Bash tool. Claude Code pipes the pending tool call (JSO
 - **Tight rules over broad rules.** No generic `KEY=value` or entropy detection in the fallback — gitleaks needs a ~2,000-word stoplist to make that usable; grep-grade tooling can't. A noisy gate gets bypassed.
 - **Skip false-positive-heavy files** in content scans: lockfiles, `*.min.js`, sourcemaps, binaries (NUL sniff in first 4KB) — the main sources of JWT-shaped noise.
 - **Publish blocklist omits what npm hard-excludes** (`.git`, `.npmrc`, `node_modules`, lockfiles can never be packed) and uses `--ignore-scripts` so `prepare` output can't corrupt the pack JSON (npm/cli#7354). npm does **not** honor `.gitignore`, which is why the tarball secret scan exists.
+- **`.npmrc` is content-gated, not filename-gated.** A committable `.npmrc` (registry, `node-linker`/`hoist`, `@scope:registry`, and `${ENV}` token references) is the common, recommended case — the token lives in the environment, not the file. Only a *literal* value assigned to an auth key (`_authToken`/`_auth`/`_password`/`_secret`) is flagged. `${ENV}` and `$ENV` values are treated as references, not secrets. This replaces the old blanket "any tracked `.npmrc` is sensitive" rule, which was a frequent false positive.
+
+## Allowlist — `.claude/gatekeeper.json`
+
+A committed, review-visible allowlist for exceptions that inline `gitleaks:allow` can't express. Kept under `.claude/` (not the repo root) to avoid another root-level dotfile. Loaded from both the git top-level and the current dir (publish runs from the package dir), after the `GATEKEEPER_SKIP` check.
+
+Each entry is `{ path, reason, … }`. **Both `path` (a glob) and a non-empty `reason` are mandatory — a malformed entry grants nothing (fail closed).** The allowed action is inferred from the field present: `sensitiveFile: true` (track a sensitive file), `rule` (a secret-rule id, list, or `"*"` — suppress for the path), `pack: true` (ship a non-build file). Globs: `*`/`?` stay within a segment, `**` spans separators; no brace/bracket expansion (patterns are meant to be narrow).
+
+Trust model (the user's explicit concern was a bad actor planting exceptions):
+
+- **Committed ⇒ reviewable.** Every entry lands in a diff — the same trust model as inline `gitleaks:allow`. That review is the primary guard.
+- **No blanket disable.** The schema can only widen one narrow, named thing (a path + one action). There is no "off" switch and no way to allow-all-rules-everywhere without enumerating a path.
+- **Reason required, suppression surfaced.** Empty/missing reason ⇒ ignored. When an entry suppresses a finding the hook still emits a `systemMessage` naming what was suppressed and why — a suppression is never silent.
+- `rule` suppression also filters gitleaks findings by rule id / `"*"`; gitleaks' own `.gitleaksignore` and inline `gitleaks:allow` remain its finer-grained tools.
+- A user-local (outside-repo) allowlist was considered for PR-proofing but not built: it wouldn't be shared with the team or work in CI, and the committed-and-reviewed model already bounds the blast radius. It's the documented upgrade path if per-machine exceptions are ever needed.
 
 ## Escape hatches (in order of preference)
 
 1. `// gitleaks:allow` comment on a flagged line — per-line, ecosystem-standard, compatible with real gitleaks.
-2. `GATEKEEPER_SKIP=1 <command>` — whole-command bypass; the deny text instructs Claude to use it only with explicit user confirmation. Known limitation: Claude could type it unprompted; a transcript-verified human-only bypass (à la sensitive-canary) is the designed upgrade path if that becomes a problem.
+2. `.claude/gatekeeper.json` allowlist entry — committed and reviewable, for file/path-level exceptions inline allow can't express (see above).
+3. `GATEKEEPER_SKIP=1 <command>` — whole-command bypass; the deny text instructs Claude to use it only with explicit user confirmation. Known limitation: Claude could type it unprompted; a transcript-verified human-only bypass (à la sensitive-canary) is the designed upgrade path if that becomes a problem.
 
 ## Known limitations
 
@@ -39,4 +55,4 @@ Native TypeScript via Node type stripping: **Node ≥ 22.18**, erasable syntax o
 
 ## Testing
 
-`pnpm test` → `tests/gatekeeper.test.ts` (13 cases: staged/predicted-staging/tracked-file/inline-allow/lockfile-skip/bypass/publish matrix). Assertions target decisions, not finding text, so they pass with or without gitleaks installed.
+`pnpm test` → `tests/gatekeeper.test.ts` (20 cases: staged/predicted-staging/tracked-file/inline-allow/lockfile-skip/bypass/publish matrix, plus `.npmrc` content-awareness and the `.claude/gatekeeper.json` allowlist — sensitiveFile/rule/pack and fail-closed on a malformed entry). Assertions target decisions, not finding text, so they pass with or without gitleaks installed.

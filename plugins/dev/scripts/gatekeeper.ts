@@ -16,9 +16,17 @@
  * exit code 2 with the findings on stderr (the exit-2 path still works when
  * Bash is broadly allowlisted, see anthropics/claude-code#18312).
  *
- * False positives:
+ * A committable `.npmrc` (registry/linker/hoist settings, `${ENV}` token refs)
+ * is allowed; only a literal credential value in it is flagged.
+ *
+ * False positives, narrowest first:
  *   - a line containing `gitleaks:allow` is never flagged (ecosystem-standard
  *     inline escape, compatible with real gitleaks)
+ *   - `.claude/gatekeeper.json` — a committed, review-visible allowlist of
+ *     narrow, reason-required exceptions (a secret rule for a path glob, a
+ *     packaged non-build file, or a tracked sensitive file). Suppressions are
+ *     reported to the user; it cannot express a blanket "disable" and a
+ *     malformed entry grants nothing.
  *   - prefixing the command with GATEKEEPER_SKIP=1 bypasses the gate entirely
  *     (requires explicit user confirmation)
  *
@@ -47,6 +55,22 @@ interface GitleaksLeak {
   RuleID: string
   File: string
   StartLine: number
+}
+
+// One allowlist entry from `.claude/gatekeeper.json`. `path` (a glob relative
+// to the repo/package root) and a non-empty `reason` are mandatory; an entry
+// missing either grants nothing (fail closed). What it allows is inferred from
+// which field is present:
+//   rule           → suppress that secret rule (id, list, or '*') for the path
+//   pack: true     → let the path ship in a publish tarball (non-build check)
+//   sensitiveFile  → let the path be tracked in git despite the sensitive-file
+//                    pattern (e.g. an intentionally committed config)
+interface AllowEntry {
+  path: string
+  reason: string
+  rule?: string | string[]
+  pack?: boolean
+  sensitiveFile?: boolean
 }
 
 // --- Rules -------------------------------------------------------------------
@@ -110,14 +134,147 @@ function looksBinary(buf: Buffer): boolean {
 
 const findings: string[] = []
 
+// Findings that an allowlist entry suppressed. Surfaced to the user even on an
+// allow verdict so a suppression is never silent (the review-visibility of the
+// committed `.claude/gatekeeper.json` is the primary safety mechanism; this is
+// the secondary one).
+const suppressed: string[] = []
+
+// --- Allowlist (`.claude/gatekeeper.json`) -----------------------------------
+
+// Loaded after chdir. Kept in `.claude/` (not the repo root) at the user's
+// request; committed and therefore reviewable — the diff is the audit trail.
+let allowlist: AllowEntry[] = []
+
+function loadAllowlist(): AllowEntry[] {
+  const roots = new Set<string>()
+  const top = git(['rev-parse', '--show-toplevel'])
+  if (top) roots.add(top)
+  roots.add(process.cwd()) // publish runs from the package dir, which may differ
+  const entries: AllowEntry[] = []
+  for (const root of roots) {
+    const file = join(root, '.claude', 'gatekeeper.json')
+    if (!existsSync(file)) continue
+    try {
+      const parsed: { allow?: unknown } = JSON.parse(readFileSync(file, 'utf8'))
+      if (!Array.isArray(parsed.allow)) continue
+      for (const e of parsed.allow as AllowEntry[]) {
+        // A path and a non-empty reason are mandatory. Anything else grants
+        // nothing — a malformed entry can only fail closed, never open.
+        if (e && typeof e.path === 'string' && typeof e.reason === 'string' && e.reason.trim()) {
+          entries.push(e)
+        }
+      }
+    } catch {} // unreadable/invalid config → no allowances (fail closed)
+  }
+  return entries
+}
+
+// Minimal glob → RegExp: `**` spans path separators, `*`/`?` do not. No brace
+// or bracket expansion — allow patterns are meant to be narrow and literal.
+function globToRe(glob: string): RegExp {
+  let re = ''
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        re += '.*'
+        i++
+        if (glob[i + 1] === '/') i++ // `**/` also matches zero leading segments
+      } else {
+        re += '[^/]*'
+      }
+    } else if (c === '?') {
+      re += '[^/]'
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/, '\\$&')
+    }
+  }
+  return new RegExp(`^${re}$`)
+}
+
+function pathMatches(entry: AllowEntry, path: string): boolean {
+  try {
+    return globToRe(entry.path).test(path)
+  } catch {
+    return false
+  }
+}
+
+function secretAllowed(path: string, ruleId: string): boolean {
+  return allowlist.some((e) => {
+    if (e.rule === undefined) return false
+    const rules = Array.isArray(e.rule) ? e.rule : [e.rule]
+    if (!rules.includes('*') && !rules.includes(ruleId)) return false
+    if (!pathMatches(e, path)) return false
+    suppressed.push(`secret ${ruleId} in ${path} (reason: ${e.reason.trim()})`)
+    return true
+  })
+}
+
+function packAllowed(path: string): boolean {
+  return allowlist.some((e) => {
+    if (e.pack !== true || !pathMatches(e, path)) return false
+    suppressed.push(`packaged ${path} (reason: ${e.reason.trim()})`)
+    return true
+  })
+}
+
+function sensitiveFileAllowed(path: string): boolean {
+  return allowlist.some((e) => {
+    if (e.sensitiveFile !== true || !pathMatches(e, path)) return false
+    suppressed.push(`tracked sensitive file ${path} (reason: ${e.reason.trim()})`)
+    return true
+  })
+}
+
+// --- .npmrc --------------------------------------------------------------------
+
+const NPMRC_RE = /(^|\/)\.npmrc$/
+
+// A committable `.npmrc` (registry/linker/hoist config, `${ENV}` token refs) is
+// safe; only a *literal* credential value is not. Returns the 1-based lines that
+// assign a real value to an auth key.
+function npmrcCredentialLines(content: string): number[] {
+  const bad: number[] = []
+  content.split('\n').forEach((raw, i) => {
+    const line = raw.trim()
+    if (!line || line.startsWith('#') || line.startsWith(';')) return
+    // key may carry a `//registry/:` scope prefix; `_authtoken` first so it
+    // wins over the `_auth` alternative.
+    const m = line.match(/^(?:\/\/\S+:)?(_authtoken|_auth|_password|_secret)\s*=\s*(.+)$/i)
+    if (!m) return
+    const value = m[2].trim().replace(/^["']|["']$/g, '').trim()
+    if (!value) return // empty assignment
+    if (/^\$\{[^}]*\}$/.test(value)) return // ${ENV} reference — secret lives in the environment
+    if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return // $ENV reference
+    bad.push(i + 1)
+  })
+  return bad
+}
+
+// Index (staged) content of a tracked file, falling back to the working tree.
+function committedContent(file: string): string {
+  const staged = git(['show', `:${file}`])
+  if (staged) return staged
+  try {
+    return readFileSync(file, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
 // Scan text for secret rules; report per-file summary without ever echoing
-// the matched value (that would leak the secret into the transcript).
-function scanContent(content: string, label: string): void {
+// the matched value (that would leak the secret into the transcript). When a
+// `path` is given, per-path allowlist rule entries can suppress a hit.
+function scanContent(content: string, label: string, path?: string): void {
   const hits: string[] = []
   content.split('\n').forEach((line, i) => {
     if (line.includes(INLINE_ALLOW)) return
     const rule = SECRET_RULES.find((r) => r.re.test(line))
-    if (rule) hits.push(`${rule.id} at line ${i + 1}`)
+    if (!rule) return
+    if (path && secretAllowed(path, rule.id)) return
+    hits.push(`${rule.id} at line ${i + 1}`)
   })
   if (hits.length > 0) {
     const shown = hits.slice(0, 3).join(', ')
@@ -130,7 +287,7 @@ function scanWorkingTreeFile(path: string, label: string): void {
   if (SCAN_SKIP_RE.test(path) || !existsSync(path)) return
   const buf = readFileSync(path)
   if (looksBinary(buf)) return
-  scanContent(buf.toString('utf8'), label)
+  scanContent(buf.toString('utf8'), label, path)
 }
 
 // --- Read the hook payload -----------------------------------------------------
@@ -148,6 +305,8 @@ try {
 if (!command) process.exit(0)
 if (cwd && existsSync(cwd)) process.chdir(cwd)
 if (command.includes('GATEKEEPER_SKIP=1')) process.exit(0) // user-approved bypass
+
+allowlist = loadAllowlist()
 
 // hooks.json already filters via `if` (Claude Code >= 2.1.85); this re-check
 // is the fallback for older versions, where the hook fires on every Bash call.
@@ -203,11 +362,15 @@ function gitleaksStagedScan(): boolean {
       try {
         leaks = JSON.parse(readFileSync(reportPath, 'utf8'))
       } catch {}
+      // Honor per-path allowlist rule entries against gitleaks' own rule ids too
+      // (inline `gitleaks:allow` and .gitleaksignore remain the finer-grained
+      // escape hatches gitleaks applies itself).
+      leaks = leaks.filter((leak) => !secretAllowed(leak.File, leak.RuleID))
       for (const leak of leaks.slice(0, 10)) {
         findings.push(`gitleaks: ${leak.RuleID} in ${leak.File}:${leak.StartLine}`)
       }
       if (leaks.length > 10) findings.push(`gitleaks: …and ${leaks.length - 10} more findings`)
-      if (leaks.length === 0) findings.push('gitleaks detected secrets in the staged changes')
+      if (leaks.length === 0 && suppressed.length === 0) findings.push('gitleaks detected secrets in the staged changes')
       return true
     }
     return false // unexpected exit (old gitleaks?) → fall back to our rules
@@ -218,9 +381,20 @@ function gitleaksStagedScan(): boolean {
 
 if (isCommit && git(['rev-parse', '--is-inside-work-tree']) === 'true') {
   for (const file of lines(git(['ls-files']))) {
-    if (SENSITIVE_FILE_RE.test(file) && !SENSITIVE_FILE_EXCEPTIONS.test(file)) {
-      findings.push(`sensitive file tracked in git: ${file} (git rm --cached '${file}' and add to .gitignore)`)
+    if (!SENSITIVE_FILE_RE.test(file) || SENSITIVE_FILE_EXCEPTIONS.test(file)) continue
+    if (sensitiveFileAllowed(file)) continue
+    // .npmrc is content-gated: registry/linker/hoist config and ${ENV} token
+    // references are fine; only a literal credential value is a leak.
+    if (NPMRC_RE.test(file)) {
+      const credLines = npmrcCredentialLines(committedContent(file))
+      if (credLines.length > 0) {
+        findings.push(
+          `.npmrc tracked in git assigns a literal credential (line ${credLines.join(', ')}) — reference the token via \${ENV_VAR} instead, or git rm --cached '${file}'`
+        )
+      }
+      continue
     }
+    findings.push(`sensitive file tracked in git: ${file} (git rm --cached '${file}' and add to .gitignore)`)
   }
 
   const staged = lines(git(['diff', '--cached', '--name-only', '--diff-filter=ACM']))
@@ -228,7 +402,7 @@ if (isCommit && git(['rev-parse', '--is-inside-work-tree']) === 'true') {
   if (!delegated) {
     for (const file of staged) {
       if (SCAN_SKIP_RE.test(file)) continue
-      scanContent(git(['show', `:${file}`]), `staged file ${file}`)
+      scanContent(git(['show', `:${file}`]), `staged file ${file}`, file)
     }
   }
   for (const file of predictStagedFiles()) {
@@ -255,7 +429,7 @@ if (isPublish) {
     }
   } catch {} // pack failed (private package, no package.json, …) → nothing to check
 
-  const nonBuild = tarballFiles.filter((f) => NON_BUILD_RE.test(f) && !NON_BUILD_EXCEPTIONS.test(f))
+  const nonBuild = tarballFiles.filter((f) => NON_BUILD_RE.test(f) && !NON_BUILD_EXCEPTIONS.test(f) && !packAllowed(f))
   if (nonBuild.length > 0) {
     const shown = nonBuild.slice(0, 8).join(', ')
     const more = nonBuild.length > 8 ? ', …' : ''
@@ -291,6 +465,18 @@ if (findings.length > 0) {
   )
   console.error(reason + '\n\n' + context)
   process.exit(2)
+}
+
+// Allowed — but if allowlist entries suppressed findings, say so out loud. A
+// silent suppression would defeat the point of a review-visible allowlist.
+if (suppressed.length > 0) {
+  const shown = suppressed.slice(0, 5).join('; ')
+  const more = suppressed.length > 5 ? `; …and ${suppressed.length - 5} more` : ''
+  console.log(
+    JSON.stringify({
+      systemMessage: `Gatekeeper: ${suppressed.length} finding(s) suppressed by .claude/gatekeeper.json — ${shown}${more}`
+    })
+  )
 }
 
 process.exit(0)

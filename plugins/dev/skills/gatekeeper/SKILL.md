@@ -21,6 +21,14 @@ Anything matching (except `.example`/`.sample`/`.template` variants) should not 
 2. Add the pattern to `.gitignore`
 3. Commit the removal
 
+**Exception — `.npmrc`:** a committable `.npmrc` is fine and common. Registry, `node-linker`/`hoist`/`shamefully-hoist`, `save-exact`, `@scope:registry`, and `${ENV_VAR}` token references carry no secret — the token lives in the environment, not the file. Only a **literal** credential value is a leak:
+
+```bash
+grep -nE '^(//[^:]*:)?(_authToken|_auth|_password|_secret)\s*=\s*[^$[:space:]]' .npmrc
+```
+
+If that matches, replace the literal with an env reference (`//registry.npmjs.org/:_authToken=${NPM_TOKEN}`) — don't just delete the file. The hook applies exactly this content check, so a settings-only `.npmrc` passes automatically.
+
 ### Check content of outgoing changes
 
 Scan staged changes (and, before a push, commits ahead of upstream) for high-confidence secret patterns:
@@ -82,6 +90,32 @@ Exceptions: some packages intentionally ship `src/` for source maps or direct TS
 
 Run the secret patterns from Audit 1 over every file that would be published.
 
+## Allowlist — `.claude/gatekeeper.json`
+
+For exceptions that inline `gitleaks:allow` can't express (a whole fixtures tree, an intentionally tracked config, a package that ships `src/`), add a **narrow, reviewable** entry to `.claude/gatekeeper.json` — committed to the repo, so the diff is the audit trail. Prefer inline `gitleaks:allow` for a single secret line; reach for this only when a per-line escape doesn't fit.
+
+```json
+{
+  "allow": [
+    { "path": "config/.npmrc", "sensitiveFile": true, "reason": "registry + linker only, no creds" },
+    { "path": "tests/fixtures/**", "rule": "*", "reason": "fake keys in fixtures" },
+    { "path": "packages/sdk/src/**", "pack": true, "reason": "ships TS sources for consumers" }
+  ]
+}
+```
+
+Every entry needs a `path` glob (`*` and `?` stay within a path segment; `**` spans separators) **and** a non-empty `reason` — an entry missing either grants nothing (fail closed). What it allows depends on the field present:
+
+| Field | Effect |
+|-------|--------|
+| `sensitiveFile: true` | let `path` be tracked in git despite matching a sensitive-file pattern |
+| `rule: "<id>"` / `["a","b"]` / `"*"` | suppress that secret rule (or all rules) for files matching `path` |
+| `pack: true` | let `path` ship in a publish tarball despite the non-build check |
+
+**Safety model:** the file is committed, so any added exception shows up in review — that is the primary guard against a bad actor slipping one in. There is no blanket "disable" switch; entries can only widen one narrow, named thing. When an entry suppresses a finding the hook reports it to the user (it never suppresses silently). Because it's committed, keep it minimal and always fill in a real `reason`.
+
+Note: `rule` suppression covers both the built-in fallback scanner and (by rule id / `"*"`) gitleaks findings, but gitleaks' own `.gitleaksignore` and inline `gitleaks:allow` remain the finer-grained tools it applies itself.
+
 ## Reporting
 
 Summarize as:
@@ -94,4 +128,8 @@ GATEKEEPER AUDIT
 - Tarball secret scan: ✓ clean
 ```
 
-Fix what the user confirms, then re-run the blocked command. For a single false-positive line, append a `gitleaks:allow` comment to it (works for both the hook's built-in rules and real gitleaks). If a whole command is a confirmed false positive, re-run it prefixed with `GATEKEEPER_SKIP=1` — only with explicit user confirmation, never on your own judgment.
+Fix what the user confirms, then re-run the blocked command. Escape hatches, narrowest first:
+
+1. **Inline** `gitleaks:allow` — one flagged line (built-in rules and real gitleaks).
+2. **`.claude/gatekeeper.json`** — a committed, reviewable allowlist entry for a file/path-level exception (see above).
+3. **`GATEKEEPER_SKIP=1 <command>`** — whole-command bypass, only with explicit user confirmation, never on your own judgment.

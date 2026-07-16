@@ -186,3 +186,77 @@ test('blocks publish when a packed file contains a secret', inRepo((repo) => {
   assert.equal(res.denied, true)
   assert.match(res.reason, /dist\/index\.js/)
 }))
+
+// --- .npmrc content-awareness ------------------------------------------------
+
+function writeAllow(repo: string, config: unknown): void {
+  mkdirSync(join(repo, '.claude'), { recursive: true })
+  writeFileSync(join(repo, '.claude', 'gatekeeper.json'), JSON.stringify(config))
+}
+
+test('allows a tracked .npmrc with only registry/linker/hoist settings', inRepo((repo) => {
+  writeFileSync(join(repo, '.npmrc'), 'registry=https://registry.npmjs.org/\nnode-linker=hoisted\nshamefully-hoist=true\n')
+  git(repo, 'add', '-f', '.npmrc')
+  const res = runHook(repo, 'git commit -m test')
+  assert.equal(res.denied, false)
+  assert.equal(res.code, 0)
+}))
+
+test('allows a tracked .npmrc that references a token via ${ENV_VAR}', inRepo((repo) => {
+  writeFileSync(join(repo, '.npmrc'), '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\nregistry=https://registry.npmjs.org/\n')
+  git(repo, 'add', '-f', '.npmrc')
+  const res = runHook(repo, 'git commit -m test')
+  assert.equal(res.denied, false)
+}))
+
+test('blocks a tracked .npmrc that assigns a literal credential', inRepo((repo) => {
+  // A plaintext _password value — not a recognized token shape, so this
+  // exercises the .npmrc credential check itself, not the generic secret rules.
+  writeFileSync(join(repo, '.npmrc'), '//registry.npmjs.org/:_password=s3cr3t-literal-value\n')
+  git(repo, 'add', '-f', '.npmrc')
+  const res = runHook(repo, 'git commit -m test')
+  assert.equal(res.denied, true)
+  assert.match(res.reason, /\.npmrc/)
+}))
+
+// --- Allowlist (.claude/gatekeeper.json) -------------------------------------
+
+test('allowlist: sensitiveFile entry permits a tracked .env', inRepo((repo) => {
+  writeFileSync(join(repo, '.env'), 'PORT=3000\n')
+  git(repo, 'add', '-f', '.env')
+  writeAllow(repo, { allow: [{ path: '.env', sensitiveFile: true, reason: 'app config, no secrets' }] })
+  const res = runHook(repo, 'git commit -m test')
+  assert.equal(res.denied, false)
+  assert.equal(res.code, 0)
+}))
+
+test('allowlist: per-path rule "*" suppresses a secret in matching files', inRepo((repo) => {
+  mkdirSync(join(repo, 'fixtures'))
+  writeFileSync(join(repo, 'fixtures', 'sample.js'), FAKE_AWS_KEY)
+  git(repo, 'add', 'fixtures/sample.js')
+  writeAllow(repo, { allow: [{ path: 'fixtures/**', rule: '*', reason: 'fake keys in test fixtures' }] })
+  const res = runHook(repo, 'git commit -m test')
+  assert.equal(res.denied, false)
+}))
+
+test('allowlist: a malformed entry (missing reason) grants nothing', inRepo((repo) => {
+  writeFileSync(join(repo, '.env'), 'PORT=3000\n')
+  git(repo, 'add', '-f', '.env')
+  writeAllow(repo, { allow: [{ path: '.env', sensitiveFile: true }] })
+  const res = runHook(repo, 'git commit -m test')
+  assert.equal(res.denied, true)
+  assert.match(res.reason, /\.env/)
+}))
+
+test('allowlist: pack entry permits an intentionally shipped src/', inRepo((repo) => {
+  mkdirSync(join(repo, 'src'))
+  mkdirSync(join(repo, 'dist'))
+  writeFileSync(join(repo, 'src', 'index.ts'), 'export {}\n')
+  writeFileSync(join(repo, 'dist', 'index.js'), 'module.exports = {}\n')
+  writeFileSync(join(repo, '.npmignore'), '.claude\n')
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'gatekeeper-test-pkg', version: '1.0.0', main: 'dist/index.js' }))
+  writeAllow(repo, { allow: [{ path: 'src/**', pack: true, reason: 'ships TS sources for consumers' }] })
+  const res = runHook(repo, 'npm publish')
+  assert.equal(res.denied, false)
+  assert.equal(res.code, 0)
+}))
