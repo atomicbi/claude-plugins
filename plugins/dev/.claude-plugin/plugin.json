@@ -1,7 +1,7 @@
 {
   "name": "dev",
   "description": "Developer workflow skills — session wrapup, commit hygiene, secret-leak gatekeeper, and more",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": {
     "name": "Atomic BI"
   },
