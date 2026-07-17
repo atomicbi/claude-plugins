@@ -22,9 +22,10 @@ Structured wrap-up for coding sessions. Cleans up, validates, documents, commits
     ├── 4. SECURITY GATE (secrets + package contents)
     ├── 5. UPDATE DOCS (if architectural changes)
     ├── 6. COMMIT (meaningful message)
-    ├── 7. VERSION BUMP (if configured)
-    ├── 8. PUBLISH / PUSH (if configured)
-    └── 9. SUMMARY
+    ├── 7. CHANGELOG (if configured — reconcile before bumping)
+    ├── 8. VERSION BUMP (if configured)
+    ├── 9. PUBLISH / PUSH (if configured)
+    └── 10. SUMMARY
 ```
 
 ## Init Flow
@@ -39,6 +40,7 @@ Scan the project root for:
 - **Monorepo**: look for `pnpm-workspace.yaml`, `turbo.json`, `lerna.json`, `packages/` dir
 - **Frontend**: look for `vite.config.*`, `next.config.*`, `src/App.*`, `src/pages/`
 - **Docs structure**: check for `docs/` folder, per-package `docs/`, or just root CLAUDE.md
+- **Changelog**: look for `CHANGELOG.md` (Keep a Changelog format?) or a custom changelog source (e.g. a data file the website/releases render from)
 
 ### Step 2 — Recommend & ask
 
@@ -60,6 +62,8 @@ RECOMMENDATIONS:
 - Publish on wrapup? [yes/no]
   - Note: pnpm publish requires browser auth — wrapup will
     bump + commit + tag, then prompt you to publish manually.
+- Changelog on release? [detected CHANGELOG.md / not detected — recommend for
+  published or open-source packages]
 - Smoke tests for frontend? [not set up — recommend adding]
 - Claude Co-Authored-By trailer in commits?
   [disable for this repo (default) / disable globally / keep enabled]
@@ -82,6 +86,8 @@ Add a `## Wrapup Config` section to the project's CLAUDE.md:
 - docs: monorepo (per-package docs/ referenced in root CLAUDE.md)
 - frontend_smoke: no (or: follow docs/smoke-tests.md)
 - co_authored_by: no (or: yes / no (global))
+- changelog: no (or: `CHANGELOG.md` (keep-a-changelog) / custom — describe the
+  format, file, and any sync commands in prose; wrapup follows the description)
 ```
 
 Keep this section concise. It is the single source of truth for wrapup behavior.
@@ -167,20 +173,40 @@ If the key is **not set** in the Wrapup Config:
    - **Keep enabled** → record `co_authored_by: yes`
 3. Persist the answer in the `## Wrapup Config` section so the question is asked at most once per project.
 
-### 7. Version Bump (if configured)
+### 7. Changelog (if configured)
+
+Only when `changelog:` is configured and not `no`. Runs **before** the version bump so the reconciled entries can drive the bump decision.
+
+**Reconcile first — never trust session memory.** The wrapup session may only cover part of what shipped since the last release. Ground the entry in what actually happened:
+
+```bash
+git describe --tags --abbrev=0          # last release tag
+git log <last-tag>..HEAD --oneline      # everything since — not just this session
+gh pr list --state merged --search "merged:>..." # if the repo uses PRs
+```
+
+Then update the changelog in the configured format:
+
+- **`CHANGELOG.md` (keep-a-changelog)**: bring `## [Unreleased]` in line with the reconciled history — add missing entries under `Added` / `Changed` / `Fixed` / `Removed` / `Security`, drop entries that never merged. After the version is chosen in step 8, promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and insert a fresh empty `[Unreleased]` above it.
+- **Custom format**: follow the prose in the config (file, entry shape, sync commands to run and when). Same discipline: reconcile against git/PR history first, stamp the version once step 8 picks it.
+
+Keep entries short and user-facing — what changed for consumers, not which files moved. Classify each entry (breaking / feature / improvement / fix); step 8 uses the classification.
+
+### 8. Version Bump (if configured)
 
 Only when `version_bump: yes` in config:
 
-- Infer bump type from changes:
+- Infer bump type — **from the reconciled changelog when step 7 ran** (any breaking entry → **major**; any feature/improvement → **minor**; only fixes → **patch**), otherwise from the session's changes:
   - Bug fix, patch-level change → **patch**
   - New feature, enhancement → **minor**
   - Breaking change → **major**
 - Present the inferred bump to the user for confirmation: "Bump 1.2.3 → 1.3.0 (minor — new feature X)?"
+- Prefer tool-driven bumps over hand-editing where one exists (`npm version <part> --no-git-tag-version`, `uv version --bump <part>`) — it keeps lockfiles in sync
 - If `aligned`: bump ALL packages to the same version
-- Commit the version bump separately: `chore: bump version to X.Y.Z`
+- Stamp the changelog entry from step 7 with the chosen version, and commit it together with the bump: `chore: bump version to X.Y.Z`
 - Tag: `vX.Y.Z`
 
-### 8. Publish / Push (if configured)
+### 9. Publish / Push (if configured)
 
 **Push** (when `push: yes`):
 - `git push` to the current branch's remote
@@ -190,7 +216,7 @@ Only when `version_bump: yes` in config:
 - Instead, tell the user: "Versions bumped and tagged. Run `! pnpm publish -r` to publish."
 - If the project has a publish script in package.json, suggest that instead
 
-### 9. Summary
+### 10. Summary
 
 End with a concise wrap-up summary:
 
@@ -202,6 +228,7 @@ WRAPUP COMPLETE
 - Quality: roam health 64% → 68% (advisory)
 - Docs: updated packages/core/docs/adapters.md
 - Committed: "feat: add vercel adapter with stateless sessions"
+- Changelog: 1.3.0 entry (2 features, 1 fix) — reconciled against v1.2.3..HEAD
 - Version: 1.3.0 (minor) — all packages aligned
 - Pushed: yes
 - Publish: run `! pnpm publish -r` when ready
