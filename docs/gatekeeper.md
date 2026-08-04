@@ -11,12 +11,34 @@ A PreToolUse hook on the Bash tool. Claude Code pipes the pending tool call (JSO
 
 `hooks.json` uses the `if` field (Claude Code ≥ 2.1.85) with both bare and wildcard patterns per command (`Bash(git commit)` + `Bash(git commit *)` — a bare pattern only matches the exact argless command, and `if` doesn't support pipe alternation, hence six entries). The script re-checks the command itself as a fallback for older Claude Code versions where `if` is ignored.
 
+## Command classification — parse, don't grep
+
+What a command *is* comes from parsing it as shell, never from matching the command string. `parseSegments()` splits the command the way sh would: quoted strings, `$(…)`/backtick substitutions and heredoc bodies stay inside the token they belong to, so they can neither end a segment nor become a command name. A segment is then classified by position — leading `VAR=value` assignments, wrappers (`sudo`, `env`, …) and shell keywords (`if`, `do`, …) are skipped, flags that take a separate value (`git -C dir`, `pnpm --filter pkg`) are stepped over, and the first positional is the subcommand.
+
+This replaced substring regexes (`/\b(npm|pnpm)\b[^;&|]*\spublish\b/` and friends) that ran against the *whole* command, heredoc included — and whose negated character class spanned newlines. Three real defects, all fixed by parsing:
+
+- **Over-firing.** A commit whose message said "npm repository" on one line and "at publish time" a few lines down was classified as a publish, and `npm pack` then flagged the private root package. Rewording or an allowlist entry are both wrong answers: a `pack: true` glob broad enough to silence it would mask real leaks in the publishable packages.
+- **Fail-open bypass.** `GATEKEEPER_SKIP=1` was checked with `command.includes()`, so a commit message merely *mentioning* it disarmed the gate entirely. It must now appear as an actual leading assignment.
+- **Re-executed substitutions.** Staging prediction built a `sh -c "git add … ${args}"` string from the command text, which would evaluate a `$(…)` the user's command had only quoted. Parsed args go straight to `git` with no shell.
+
+Under-firing is the other half: a real publish behind a subshell, a keyword, or `npm run publish` is still gated (the classification tests in `tests/gatekeeper.test.ts` pin both directions). Unparseable input degrades toward the old behavior in the safe direction — an unterminated quote swallows the rest of the command rather than inventing a command name.
+
+## Audit mode — `gatekeeper --audit`
+
+The same detection, run on demand instead of on a command: sensitive tracked files, secrets in outgoing changes (staged, unstaged *and* untracked), and `npm pack` contents plus a tarball secret scan for **every non-private package in the workspace**. Prints one compact report and always exits 0 — it reports, it never gates.
+
+`plugins/dev/bin/gatekeeper` is a shim that runs it; Claude Code puts every plugin's `bin/` on PATH (verified: the entry is added even when the directory doesn't exist), so skills can call `gatekeeper --audit` without resolving a plugin path.
+
+This exists for token economy, and the numbers came from the local transcripts. Across 32 recorded `dev:gatekeeper` runs the skills re-derived these checks by hand — 187 Bash calls, ~30k tokens of output, the largest bucket being per-package `npm pack` listings (11.3k tokens across 32 calls). All of it landed in the main conversation, where it is re-sent on every subsequent turn. One `--audit` call returns ~6 lines. The skills now call it and are forbidden from hand-rolling the equivalent greps.
+
+Auditing the whole workspace also closes the `pnpm -r publish` blind spot noted under Known limitations: the hook packs only the directory the publish runs from, but the audit walks every tracked non-private `package.json`.
+
 ## Design decisions
 
 - **Fail open.** Missing node, unreadable payload, pack failure, non-git dir → exit 0. A hook that can error closed trains people to disable it. Blocking is reserved for actual findings.
 - **Block on two channels.** JSON `permissionDecision: deny` on stdout *and* exit code 2 with findings on stderr. The exit-2 path survives the known issue where JSON denies are ignored when Bash is broadly allowlisted (anthropics/claude-code#18312).
 - **Never echo matched values.** Findings report file, line, and rule id only — printing the match would leak the secret into the transcript and the API. (A popular community hook gets this wrong.)
-- **Predict staging.** Because the hook runs pre-command, `git diff --cached` alone misses `git commit -a` and chained `git add … && git commit`. The script stages nothing itself: `-a`/`--all` → scan modified tracked files; `git add` segments → `git add --dry-run --ignore-missing` with the same args to learn what *would* be staged.
+- **Predict staging.** Because the hook runs pre-command, `git diff --cached` alone misses `git commit -a` and chained `git add … && git commit`. The script stages nothing itself: `-a`/`--all` → scan modified tracked files; `git add` segments → `git add --dry-run --ignore-missing` with the same (parsed, unexpanded) args to learn what *would* be staged.
 - **Delegate to gitleaks when installed** (`gitleaks git --pre-commit --staged --redact`), 180+ maintained rules and entropy scoring for free; our ~15 prefix-anchored rules are the zero-dependency fallback. Filename checks (tracked `.env` etc.) always run locally — gitleaks won't flag an empty tracked `.env`.
 - **Tight rules over broad rules.** No generic `KEY=value` or entropy detection in the fallback — gitleaks needs a ~2,000-word stoplist to make that usable; grep-grade tooling can't. A noisy gate gets bypassed.
 - **Skip false-positive-heavy files** in content scans: lockfiles, `*.min.js`, sourcemaps, binaries (NUL sniff in first 4KB) — the main sources of JWT-shaped noise.
@@ -41,11 +63,11 @@ Trust model (the user's explicit concern was a bad actor planting exceptions):
 
 1. `// gitleaks:allow` comment on a flagged line — per-line, ecosystem-standard, compatible with real gitleaks.
 2. `.claude/gatekeeper.json` allowlist entry — committed and reviewable, for file/path-level exceptions inline allow can't express (see above).
-3. `GATEKEEPER_SKIP=1 <command>` — whole-command bypass; the deny text instructs Claude to use it only with explicit user confirmation. Known limitation: Claude could type it unprompted; a transcript-verified human-only bypass (à la sensitive-canary) is the designed upgrade path if that becomes a problem.
+3. `GATEKEEPER_SKIP=1 <command>` — whole-command bypass, recognized only as a leading environment assignment (or after `env`/`sudo`), not as text anywhere in the command. The deny text instructs Claude to use it only with explicit user confirmation. Known limitation: Claude could type it unprompted; a transcript-verified human-only bypass (à la sensitive-canary) is the designed upgrade path if that becomes a problem.
 
 ## Known limitations
 
-- `pnpm -r publish` at a workspace root packs the root package, not each workspace package — the check is meaningless there (and `publishConfig.directory` isn't resolved). Monorepo publishes should rely on per-package `files` whitelists; a `-r`-aware iteration is future work.
+- `pnpm -r publish` at a workspace root packs the root package, not each workspace package, so the *hook* check is weak there (and `publishConfig.directory` isn't resolved). `gatekeeper --audit` does iterate every non-private package, so a pre-publish audit covers what the hook can't.
 - Push is not gated (team decision: commit gating suffices).
 - No entry-point existence check yet (tarball could be junk-free but missing `dist/` if the build didn't run).
 
@@ -55,4 +77,6 @@ Native TypeScript via Node type stripping: **Node ≥ 22.18**, erasable syntax o
 
 ## Testing
 
-`pnpm test` → `tests/gatekeeper.test.ts` (20 cases: staged/predicted-staging/tracked-file/inline-allow/lockfile-skip/bypass/publish matrix, plus `.npmrc` content-awareness and the `.claude/gatekeeper.json` allowlist — sensitiveFile/rule/pack and fail-closed on a malformed entry). Assertions target decisions, not finding text, so they pass with or without gitleaks installed.
+`pnpm test` → `tests/gatekeeper.test.ts` (32 cases: staged/predicted-staging/tracked-file/inline-allow/lockfile-skip/bypass/publish matrix, command classification in both directions, `--audit` mode across a workspace, plus `.npmrc` content-awareness and the `.claude/gatekeeper.json` allowlist — sensitiveFile/rule/pack and fail-closed on a malformed entry). Assertions target decisions, not finding text, so they pass with or without gitleaks installed.
+
+The classification cases work by fixture, not by inspecting internals: the repo they run in has no `files` whitelist, so a command misread as a publish denies with a packaging finding while a correctly-read commit stays clean.

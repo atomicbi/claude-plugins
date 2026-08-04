@@ -30,67 +30,7 @@ Structured wrap-up for coding sessions. Cleans up, validates, documents, commits
 
 ## Init Flow
 
-Triggered when no `## Wrapup Config` section exists in the project's CLAUDE.md. Auto-detect what you can, ask the user to confirm.
-
-### Step 1 — Auto-detect
-
-Scan the project root for:
-- **Package manager**: look for `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`, `bun.lockb`
-- **Scripts**: read `package.json` `scripts` for `lint`, `check`, `typecheck`, `test`, `build`
-- **Monorepo**: look for `pnpm-workspace.yaml`, `turbo.json`, `lerna.json`, `packages/` dir
-- **Frontend**: look for `vite.config.*`, `next.config.*`, `src/App.*`, `src/pages/`
-- **Docs structure**: check for `docs/` folder, per-package `docs/`, or just root CLAUDE.md
-- **Changelog**: look for `CHANGELOG.md` (Keep a Changelog format?) or a custom changelog source (e.g. a data file the website/releases render from)
-
-### Step 2 — Recommend & ask
-
-Present findings and recommendations to the user:
-
-```
-WRAPUP INIT — detected:
-- Package manager: pnpm
-- Monorepo: yes (turbo + pnpm workspaces)
-- Check command: `pnpm check` (lint + typecheck)
-- Test command: `pnpm test` (or: none detected)
-- Frontend: no (or: yes — vite/react)
-- Docs: monorepo per-package docs/ + root CLAUDE.md
-
-RECOMMENDATIONS:
-- Push after commit? [yes/no]
-- Version bump on wrapup? [yes/no]
-  - If yes: aligned across all packages? [yes/no]
-- Publish on wrapup? [yes/no]
-  - Note: pnpm publish requires browser auth — wrapup will
-    bump + commit + tag, then prompt you to publish manually.
-- Changelog on release? [detected CHANGELOG.md / not detected — recommend for
-  published or open-source packages]
-- Smoke tests for frontend? [not set up — recommend adding]
-- Claude Co-Authored-By trailer in commits?
-  [disable for this repo (default) / disable globally / keep enabled]
-```
-
-Wait for user confirmation before proceeding.
-
-### Step 3 — Write config
-
-Add a `## Wrapup Config` section to the project's CLAUDE.md:
-
-```markdown
-## Wrapup Config
-
-- check: `pnpm check`
-- test: `pnpm test` (or: skip)
-- push: yes
-- version_bump: yes (aligned across all packages)
-- publish: yes (manual — prompt after tag)
-- docs: monorepo (per-package docs/ referenced in root CLAUDE.md)
-- frontend_smoke: no (or: follow docs/smoke-tests.md)
-- co_authored_by: no (or: yes / no (global))
-- changelog: no (or: `CHANGELOG.md` (keep-a-changelog) / custom — describe the
-  format, file, and any sync commands in prose; wrapup follows the description)
-```
-
-Keep this section concise. It is the single source of truth for wrapup behavior.
+If the project's CLAUDE.md has no `## Wrapup Config` section, follow [reference/init-flow.md](reference/init-flow.md) first — auto-detect, confirm with the user, write the config — then continue with the workflow below in the same invocation. If the config already exists, skip that file entirely; everything below reads from the config.
 
 ## Step-by-Step Workflow
 
@@ -130,14 +70,15 @@ If roam-code is not available, leave a subtle suggestion to install it. If the u
 
 ### 4. Security Gate
 
-Run the **gatekeeper** audit (see the `gatekeeper` skill in this plugin) before committing:
+One command — it covers sensitive files tracked in git, secrets in outgoing changes, and `npm pack` contents plus a secret scan for every publishable package in the workspace:
 
-1. **Secret scan**: no secrets in staged/outgoing changes; no sensitive files tracked in git (`.env`, `*.pem`, keys, credential JSON, `.npmrc`). Check `.gitignore` covers them.
-2. **Package contents** (only if this wrapup will publish): `npm pack --dry-run` per publishable package — the tarball must contain only build-relevant files (build output, `package.json`, README, LICENSE, type declarations). No `src/`, `docs/`, tests, `tsconfig*`, `*.tsbuildinfo`, `.mcp.json`, `.env*`, `CLAUDE.md`. Recommend a `files` whitelist in package.json if missing.
+```bash
+gatekeeper --audit
+```
 
 Findings here are **blocking** — fix them (or get explicit user sign-off on false positives) before proceeding to commit. If a real secret was already committed, tell the user to rotate it; removing it from git does not un-leak it.
 
-Note: the dev plugin's gatekeeper hook re-runs a fast version of these checks automatically on `git commit` and `npm`/`pnpm publish`, so doing this step first avoids being blocked mid-commit.
+Do not hand-roll these checks (`git ls-files | grep`, per-package `npm pack` loops, pattern greps) — the script already does them, and reproducing it by hand pulls the whole scan through the conversation. Load the `gatekeeper` skill only when a finding actually needs remediation or judgment; a clean report needs nothing further.
 
 ### 5. Update Docs
 
@@ -157,40 +98,11 @@ Only update docs for meaningful architectural or behavioral changes. Bug fixes a
 - If there are logically separate changes, consider splitting into multiple commits
 - Include user's parallel changes unless they conflict or have issues
 
-#### Co-Authored-By trailer
-
-Controlled by `co_authored_by` in the Wrapup Config:
-
-- `co_authored_by: no` (or `no (global)`) — do NOT append the `Co-Authored-By: Claude ...` trailer to commit messages
-- `co_authored_by: yes` — keep the default trailer behavior
-
-If the key is **not set** in the Wrapup Config:
-
-1. Check `~/.claude/settings.json` first — if it already contains `"includeCoAuthoredBy": false`, silently record `co_authored_by: no (global)` in the Wrapup Config and move on (don't ask).
-2. Otherwise ask the user (before committing), with these options:
-   - **Disable for this repository** (default/recommended) → record `co_authored_by: no` in the Wrapup Config
-   - **Disable globally** → set `"includeCoAuthoredBy": false` in `~/.claude/settings.json` (merge into the existing JSON — never overwrite other keys) and record `co_authored_by: no (global)`
-   - **Keep enabled** → record `co_authored_by: yes`
-3. Persist the answer in the `## Wrapup Config` section so the question is asked at most once per project.
+**Co-Authored-By trailer** — controlled by `co_authored_by` in the Wrapup Config: `no` (or `no (global)`) means do NOT append the `Co-Authored-By: Claude ...` trailer; `yes` keeps default behavior. If the key is missing from the config, follow the decision procedure in [reference/init-flow.md](reference/init-flow.md) and persist the answer there so it's asked at most once per project.
 
 ### 7. Changelog (if configured)
 
-Only when `changelog:` is configured and not `no`. Runs **before** the version bump so the reconciled entries can drive the bump decision.
-
-**Reconcile first — never trust session memory.** The wrapup session may only cover part of what shipped since the last release. Ground the entry in what actually happened:
-
-```bash
-git describe --tags --abbrev=0          # last release tag
-git log <last-tag>..HEAD --oneline      # everything since — not just this session
-gh pr list --state merged --search "merged:>..." # if the repo uses PRs
-```
-
-Then update the changelog in the configured format:
-
-- **`CHANGELOG.md` (keep-a-changelog)**: bring `## [Unreleased]` in line with the reconciled history — add missing entries under `Added` / `Changed` / `Fixed` / `Removed` / `Security`, drop entries that never merged. After the version is chosen in step 8, promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and insert a fresh empty `[Unreleased]` above it.
-- **Custom format**: follow the prose in the config (file, entry shape, sync commands to run and when). Same discipline: reconcile against git/PR history first, stamp the version once step 8 picks it.
-
-Keep entries short and user-facing — what changed for consumers, not which files moved. Classify each entry (breaking / feature / improvement / fix); step 8 uses the classification.
+Skip entirely unless `changelog:` is configured and not `no`. When it is, follow [reference/changelog.md](reference/changelog.md) — it reconciles against real git/PR history (not session memory) and runs before the version bump so its entry classifications can drive the bump.
 
 ### 8. Version Bump (if configured)
 

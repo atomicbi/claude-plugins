@@ -10,8 +10,10 @@ plugins/dev/                      # "dev" plugin
   .claude-plugin/plugin.json      # name, description, version (bump to ship updates)
   skills/wrapup/                  # session wrap-up workflow
   skills/gatekeeper/              # security & packaging audit (companion to the hook)
+    reference/                    # loaded on demand, not on every invocation
   hooks/hooks.json                # PreToolUse gate on git commit / npm|pnpm publish
-  scripts/gatekeeper.ts           # the hook implementation (native TS, run by node)
+  scripts/gatekeeper.ts           # hook + `--audit` mode (native TS, run by node)
+  bin/gatekeeper                  # shim; plugin bin/ is on PATH automatically
 tests/                            # node --test suites (repo-only, not shipped)
 docs/                             # deep-dives (see below)
 ```
@@ -36,6 +38,7 @@ See [docs/plugin-development.md](docs/plugin-development.md) for the full workfl
 - **Live-tree development** ("pnpm link" equivalent): `claude --plugin-dir /path/to/claude-plugins/plugins/dev` — from any project. Skills hot-reload on edit; after changing hooks run `/reload-plugins`.
 - **Ship an update**: bump the plugin's `plugin.json` version, commit, push. Teammates get it via `/plugin marketplace update atomicbi` (or auto-update if enabled).
 - The gatekeeper hook's design decisions are documented in [docs/gatekeeper.md](docs/gatekeeper.md).
+- Keeping skills cheap — the cost model, `reference/` progressive disclosure, verified frontmatter behavior, and how to re-measure from transcripts — is in [docs/skill-token-economy.md](docs/skill-token-economy.md).
 
 ## Wrapup Config
 

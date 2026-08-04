@@ -153,6 +153,94 @@ test('ignores unrelated commands', inRepo((repo) => {
   assert.equal(res.code, 0)
 }))
 
+// --- Command classification (no over-firing on message text) -----------------
+
+// A package the publish check would flag: no "files" whitelist, so src/ and
+// tsconfig.json land in the tarball. If a commit is misread as a publish, the
+// hook blocks with a packaging finding — which is exactly what used to happen.
+function packableRepo(repo: string): void {
+  mkdirSync(join(repo, 'src'))
+  mkdirSync(join(repo, 'dist'))
+  writeFileSync(join(repo, 'src', 'index.ts'), 'export {}\n')
+  writeFileSync(join(repo, 'dist', 'index.js'), 'module.exports = {}\n')
+  writeFileSync(join(repo, 'tsconfig.json'), '{}\n')
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'gatekeeper-test-pkg', version: '1.0.0', main: 'dist/index.js' }))
+  git(repo, 'add', '-A')
+}
+
+test('a commit message mentioning npm and publish is not treated as a publish', inRepo((repo) => {
+  packableRepo(repo)
+  const message = [
+    'fix(gatekeeper): stop packing the private root package',
+    '',
+    'The npm repository never receives this package, so the check',
+    'was meaningless — the tarball only matters at publish time.'
+  ].join('\n')
+  const res = runHook(repo, `git commit -m "$(cat <<'EOF'\n${message}\nEOF\n)"`)
+  assert.equal(res.denied, false)
+  assert.equal(res.code, 0)
+}))
+
+test('a bare heredoc commit message does not trip the publish branch', inRepo((repo) => {
+  packableRepo(repo)
+  const res = runHook(repo, 'git commit -F - <<\'EOF\'\nchore: notes\n\nrun pnpm publish once the registry is ready\nEOF\n')
+  assert.equal(res.denied, false)
+}))
+
+test('a single-line message mentioning npm publish is not treated as a publish', inRepo((repo) => {
+  packableRepo(repo)
+  const res = runHook(repo, 'git commit -m "docs: explain npm publish flow"')
+  assert.equal(res.denied, false)
+}))
+
+test('a message mentioning git commit does not make a non-git command a commit', inRepo((repo) => {
+  writeFileSync(join(repo, 'config.js'), FAKE_AWS_KEY)
+  git(repo, 'add', 'config.js')
+  const res = runHook(repo, 'echo "remember to git commit this"')
+  assert.equal(res.denied, false)
+  assert.equal(res.code, 0)
+}))
+
+test('GATEKEEPER_SKIP=1 inside a commit message does not disarm the gate', inRepo((repo) => {
+  writeFileSync(join(repo, 'config.js'), FAKE_AWS_KEY)
+  git(repo, 'add', 'config.js')
+  const res = runHook(repo, 'git commit -m "note: GATEKEEPER_SKIP=1 is the bypass"')
+  assert.equal(res.denied, true)
+}))
+
+test('still gates a real publish chained after a commit', inRepo((repo) => {
+  packableRepo(repo)
+  const res = runHook(repo, 'git commit -m "chore: release" && npm publish')
+  assert.equal(res.denied, true)
+  assert.match(res.reason, /non-build file/)
+}))
+
+test('still gates a publish behind flags and a wrapper', inRepo((repo) => {
+  packableRepo(repo)
+  const res = runHook(repo, 'env FOO=bar pnpm -r --filter pkg publish --tag next')
+  assert.equal(res.denied, true)
+  assert.match(res.reason, /non-build file/)
+}))
+
+test('still gates a publish inside a subshell or behind a shell keyword', inRepo((repo) => {
+  packableRepo(repo)
+  for (const cmd of ['(cd . && npm publish)', 'if [ -f package.json ]; then npm publish; fi']) {
+    const res = runHook(repo, cmd)
+    assert.equal(res.denied, true, cmd)
+    assert.match(res.reason, /non-build file/)
+  }
+}))
+
+test('still gates git commit -a behind a global -C flag', inRepo((repo) => {
+  writeFileSync(join(repo, 'base.txt'), 'clean\n')
+  git(repo, 'add', 'base.txt')
+  git(repo, 'commit', '-q', '-m', 'base')
+  writeFileSync(join(repo, 'base.txt'), `clean\n${FAKE_GITLAB_PAT}\n`)
+  const res = runHook(repo, `git -C ${repo} -c user.name=x commit -am "wip"`)
+  assert.equal(res.denied, true)
+  assert.match(res.reason, /base\.txt/)
+}))
+
 // --- Publish gating -----------------------------------------------------------
 
 test('blocks publish when the tarball contains non-build files', inRepo((repo) => {
@@ -185,6 +273,59 @@ test('blocks publish when a packed file contains a secret', inRepo((repo) => {
   const res = runHook(repo, 'npm publish')
   assert.equal(res.denied, true)
   assert.match(res.reason, /dist\/index\.js/)
+}))
+
+// --- Audit mode (--audit) ----------------------------------------------------
+
+interface AuditResult {
+  code: number
+  out: string
+}
+
+function runAudit(cwd: string): AuditResult {
+  const res = spawnSync('node', [GATEKEEPER, '--audit'], { cwd, encoding: 'utf8' })
+  return { code: res.status ?? -1, out: res.stdout }
+}
+
+test('audit reports a clean repo without blocking', inRepo((repo) => {
+  writeFileSync(join(repo, 'clean.txt'), 'nothing to see\n')
+  git(repo, 'add', 'clean.txt')
+  const res = runAudit(repo)
+  assert.equal(res.code, 0)
+  assert.match(res.out, /GATEKEEPER AUDIT/)
+  assert.match(res.out, /findings: none/)
+}))
+
+test('audit covers every publishable package in a workspace, skipping private ones', inRepo((repo) => {
+  mkdirSync(join(repo, 'packages', 'a', 'src'), { recursive: true })
+  mkdirSync(join(repo, 'packages', 'a', 'dist'), { recursive: true })
+  mkdirSync(join(repo, 'packages', 'b', 'dist'), { recursive: true })
+  writeFileSync(join(repo, 'packages', 'a', 'src', 'index.ts'), 'export {}\n')
+  writeFileSync(join(repo, 'packages', 'a', 'dist', 'index.js'), 'module.exports = {}\n')
+  writeFileSync(join(repo, 'packages', 'b', 'dist', 'index.js'), 'module.exports = {}\n')
+  writeFileSync(join(repo, 'packages', 'a', 'package.json'), JSON.stringify({ name: 'pkg-a', version: '1.0.0', main: 'dist/index.js' }))
+  writeFileSync(join(repo, 'packages', 'b', 'package.json'), JSON.stringify({ name: 'pkg-b', version: '2.0.0', main: 'dist/index.js', files: ['dist'] }))
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'root', version: '0.0.0', private: true }))
+  git(repo, 'add', '-A')
+  const res = runAudit(repo)
+  assert.equal(res.code, 0) // an audit reports, it never gates
+  assert.match(res.out, /2 publishable package\(s\): pkg-a@1\.0\.0, pkg-b@2\.0\.0/)
+  assert.match(res.out, /pkg-a@1\.0\.0: package tarball contains 1 non-build file/)
+  assert.doesNotMatch(res.out, /pkg-b@2\.0\.0: package tarball/) // files whitelist → clean
+  assert.doesNotMatch(res.out, /root/) // private → not published, not audited
+}))
+
+test('audit finds secrets in uncommitted work and sensitive tracked files', inRepo((repo) => {
+  writeFileSync(join(repo, 'base.txt'), 'clean\n')
+  git(repo, 'add', 'base.txt')
+  git(repo, 'commit', '-q', '-m', 'base')
+  writeFileSync(join(repo, '.env'), 'DB_PASSWORD=hunter2\n')
+  git(repo, 'add', '-f', '.env')
+  git(repo, 'commit', '-q', '-m', 'env')
+  writeFileSync(join(repo, 'untracked.js'), FAKE_AWS_KEY) // never staged
+  const res = runAudit(repo)
+  assert.match(res.out, /sensitive file tracked in git: \.env/)
+  assert.match(res.out, /untracked\.js/)
 }))
 
 // --- .npmrc content-awareness ------------------------------------------------

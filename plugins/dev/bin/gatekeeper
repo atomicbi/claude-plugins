@@ -1,0 +1,4 @@
+#!/bin/sh
+# On PATH automatically: Claude Code adds <plugin-root>/bin for every installed
+# plugin. Lets skills run `gatekeeper --audit` without resolving a plugin path.
+exec node "$(dirname "$0")/../scripts/gatekeeper.ts" "$@"
