@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync, execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,12 +31,21 @@ function git(cwd: string, ...args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore' })
 }
 
+// Every repo a test creates, so `inRepo` can drain them all — a submodule test
+// makes more than the one it is handed.
+const tempRepos: string[] = []
+
 function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'gatekeeper-test-'))
+  tempRepos.push(dir)
   git(dir, 'init', '-q', '.')
+  gitIdentity(dir)
+  return dir
+}
+
+function gitIdentity(dir: string): void {
   git(dir, 'config', 'user.email', 'test@test.local')
   git(dir, 'config', 'user.name', 'Test')
-  return dir
 }
 
 interface HookResult {
@@ -64,7 +73,7 @@ function inRepo(fn: (repo: string) => void): () => void {
     try {
       fn(repo)
     } finally {
-      rmSync(repo, { recursive: true, force: true })
+      for (const dir of tempRepos.splice(0)) rmSync(dir, { recursive: true, force: true })
     }
   }
 }
@@ -282,8 +291,8 @@ interface AuditResult {
   out: string
 }
 
-function runAudit(cwd: string): AuditResult {
-  const res = spawnSync('node', [GATEKEEPER, '--audit'], { cwd, encoding: 'utf8' })
+function runAudit(cwd: string, env?: NodeJS.ProcessEnv): AuditResult {
+  const res = spawnSync('node', [GATEKEEPER, '--audit'], { cwd, encoding: 'utf8', env: env ?? process.env })
   return { code: res.status ?? -1, out: res.stdout }
 }
 
@@ -387,6 +396,102 @@ test('allowlist: a malformed entry (missing reason) grants nothing', inRepo((rep
   const res = runHook(repo, 'git commit -m test')
   assert.equal(res.denied, true)
   assert.match(res.reason, /\.env/)
+}))
+
+// --- Submodules ----------------------------------------------------------------
+//
+// git reports a modified submodule as a single path, and that path is a
+// directory: readFileSync on it throws EISDIR. Left unguarded that aborts the
+// whole run, so the gate silently does not run on any repo with a submodule
+// that isn't perfectly in sync — the normal state of one you're working in.
+
+// Adds `sub` as a submodule of `repo` and leaves the gitlink dirty (the
+// submodule has a commit the parent's HEAD does not point at).
+function addDirtySubmodule(repo: string): void {
+  const sub = makeRepo()
+  writeFileSync(join(sub, 'a.txt'), 'hi\n')
+  git(sub, 'add', '-A')
+  git(sub, 'commit', '-q', '-m', 'init')
+  writeFileSync(join(repo, 'base.txt'), 'clean\n')
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-q', '-m', 'base')
+  git(repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'plugin')
+  git(repo, 'commit', '-q', '-m', 'add submodule')
+  gitIdentity(join(repo, 'plugin')) // the submodule clone has its own config
+  writeFileSync(join(repo, 'plugin', 'a.txt'), 'changed\n')
+  git(join(repo, 'plugin'), 'commit', '-q', '-am', 'move the submodule ahead')
+}
+
+test('audit survives a dirty submodule and reports it as unscanned', inRepo((repo) => {
+  addDirtySubmodule(repo)
+  writeFileSync(join(repo, 'leak.js'), FAKE_AWS_KEY)
+  const res = runAudit(repo)
+  assert.equal(res.code, 0)
+  assert.match(res.out, /GATEKEEPER AUDIT/) // a crash prints no report at all
+  assert.match(res.out, /not scanned: 1\n {2}- plugin/)
+  assert.match(res.out, /possible secret in uncommitted change: leak\.js/) // rest of the scan still ran
+}))
+
+test('audit reports a staged gitlink as unscanned rather than counting it as covered', inRepo((repo) => {
+  addDirtySubmodule(repo)
+  git(repo, 'add', 'plugin')
+  const res = runAudit(repo)
+  assert.equal(res.code, 0)
+  assert.match(res.out, /not scanned: 1\n {2}- plugin/)
+  assert.match(res.out, /findings: none/)
+}))
+
+// --- npm version floor -----------------------------------------------------------
+//
+// The tarball check parses the npm >= 12 `--json` shape. Against npm <= 11 that
+// parser yields an empty file list, which is indistinguishable from a clean
+// package — so an old npm must produce an error, never silence.
+
+// A stub `npm` that reports an old version, placed first on PATH.
+function oldNpmEnv(version: string): NodeJS.ProcessEnv {
+  const dir = mkdtempSync(join(tmpdir(), 'gatekeeper-npm-'))
+  tempRepos.push(dir) // drained by inRepo
+  const shim = join(dir, 'npm')
+  writeFileSync(shim, `#!/bin/sh\n[ "$1" = "--version" ] && echo "${version}" && exit 0\nexit 1\n`)
+  chmodSync(shim, 0o755)
+  return { ...process.env, PATH: `${dir}:${process.env.PATH ?? ''}` }
+}
+
+test('audit errors instead of passing silently when npm is older than 12', inRepo((repo) => {
+  mkdirSync(join(repo, 'dist'))
+  writeFileSync(join(repo, 'dist', 'index.js'), 'module.exports = {}\n')
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'pkg-old-npm', version: '1.0.0', main: 'dist/index.js' }))
+  git(repo, 'add', '-A')
+  const res = runAudit(repo, oldNpmEnv('11.9.0'))
+  assert.equal(res.code, 0) // it reports; it still never gates
+  assert.match(res.out, /npm 11\.9\.0 is too old for the tarball check/)
+  assert.match(res.out, /requires npm >= 12/)
+}))
+
+test('the npm floor is reported once, not once per package', inRepo((repo) => {
+  mkdirSync(join(repo, 'packages', 'a'), { recursive: true })
+  mkdirSync(join(repo, 'packages', 'b'), { recursive: true })
+  writeFileSync(join(repo, 'packages', 'a', 'package.json'), JSON.stringify({ name: 'pkg-a', version: '1.0.0' }))
+  writeFileSync(join(repo, 'packages', 'b', 'package.json'), JSON.stringify({ name: 'pkg-b', version: '1.0.0' }))
+  git(repo, 'add', '-A')
+  const res = runAudit(repo, oldNpmEnv('10.2.0'))
+  assert.match(res.out, /not scanned: 1\n/)
+}))
+
+test('commit hook does not crash on a dirty submodule', inRepo((repo) => {
+  addDirtySubmodule(repo)
+  const res = runHook(repo, 'git commit -am wip')
+  assert.equal(res.code, 0) // an uncaught EISDIR would exit 1 with the gate never having run
+  assert.equal(res.denied, false)
+}))
+
+test('commit hook still blocks a secret when a submodule is also dirty', inRepo((repo) => {
+  addDirtySubmodule(repo)
+  writeFileSync(join(repo, 'config.js'), FAKE_AWS_KEY)
+  git(repo, 'add', 'config.js')
+  const res = runHook(repo, 'git commit -m test')
+  assert.equal(res.denied, true)
+  assert.match(res.reason, /config\.js/)
 }))
 
 test('allowlist: pack entry permits an intentionally shipped src/', inRepo((repo) => {

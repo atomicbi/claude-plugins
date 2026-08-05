@@ -38,10 +38,12 @@
  *
  * Runs as native TypeScript via Node's type stripping — requires Node >= 22.18
  * (erasable type syntax only: no enums, namespaces, or parameter properties).
+ * The tarball check additionally requires npm >= 12; an older npm is reported
+ * as an error rather than silently producing an empty (clean-looking) pack.
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { readFileSync, existsSync, statSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -395,6 +397,63 @@ const findings: string[] = []
 // the secondary one).
 const suppressed: string[] = []
 
+// Paths git listed as outgoing that could not be scanned as text — a submodule
+// gitlink, a directory, a device node, or a read that failed. Skipping them is
+// correct, but a security gate that quietly narrows its own scope is as bad as
+// one that crashes, so every skip is reported.
+const unscanned: string[] = []
+
+function markUnscanned(path: string): void {
+  if (!unscanned.includes(path)) unscanned.push(path)
+}
+
+// The tarball check reads `npm pack --json`, whose shape is not stable across
+// npm majors: npm <= 11 emitted an array of pack results, npm >= 12 an object
+// keyed by package name. Only the npm 12 shape is parsed. An older npm would
+// not fail loudly against that parser — it yields an empty file list, which
+// reads exactly like a clean package — so the version is checked up front and
+// reported as an error instead.
+const MIN_NPM_MAJOR = 12
+
+let npmVersionCache: string | undefined
+function npmVersion(): string {
+  // '' is not nullish, so a failed lookup stays cached rather than re-running.
+  npmVersionCache ??= (() => {
+    try {
+      return execFileSync('npm', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    } catch {
+      return '' // npm absent → there is nothing to publish-check anyway
+    }
+  })()
+  return npmVersionCache
+}
+
+// The message to report when npm is too old, or '' when it is usable.
+function npmTooOld(): string {
+  const version = npmVersion()
+  if (!version) return ''
+  const major = Number.parseInt(version, 10)
+  if (!Number.isFinite(major) || major >= MIN_NPM_MAJOR) return ''
+  return `npm ${version} is too old for the tarball check — gatekeeper requires npm >= ${MIN_NPM_MAJOR} (npm install -g npm@latest)`
+}
+
+// Submodule gitlinks in the index. Their contents live in another repository —
+// `git show :<gitlink>` yields nothing and the path on disk is a directory — so
+// the parent repo can neither read nor usefully scan them. Skipping is correct
+// (the submodule gets its own gatekeeper run when committed there); what is not
+// correct is passing one off as scanned. Declared here, above the --audit entry
+// point, so the lazy cache is initialized by the time either path runs.
+let gitlinkCache: Set<string> | undefined
+function isGitlink(path: string): boolean {
+  gitlinkCache ??= new Set(
+    lines(git(['ls-files', '--stage'])).flatMap((line) => {
+      const m = line.match(/^160000 [0-9a-f]+ \d+\t(.+)$/)
+      return m ? [m[1]] : []
+    })
+  )
+  return gitlinkCache.has(path)
+}
+
 // --- Allowlist (`.claude/gatekeeper.json`) -----------------------------------
 
 // Loaded after chdir. Kept in `.claude/` (not the repo root) at the user's
@@ -539,8 +598,24 @@ function scanContent(content: string, label: string, path?: string): void {
 }
 
 function scanWorkingTreeFile(path: string, label: string): void {
-  if (SCAN_SKIP_RE.test(path) || !existsSync(path)) return
-  const buf = readFileSync(path)
+  if (SCAN_SKIP_RE.test(path)) return
+  let buf: Buffer
+  try {
+    // "Is a regular file", not "exists": git reports a modified submodule as a
+    // single path, and that path is a directory — existsSync says true and the
+    // read then throws EISDIR. A permissions error or a file deleted between
+    // the git query and here must degrade the report, never abort the gate.
+    const st = statSync(path, { throwIfNoEntry: false })
+    if (!st) return // gone since git listed it — nothing to scan
+    if (!st.isFile()) {
+      markUnscanned(path)
+      return
+    }
+    buf = readFileSync(path)
+  } catch {
+    markUnscanned(path)
+    return
+  }
   if (looksBinary(buf)) return
   scanContent(buf.toString('utf8'), label, path)
 }
@@ -551,6 +626,14 @@ function scanWorkingTreeFile(path: string, label: string): void {
 // prints one compact report, for the gatekeeper/wrapup skills to read. Same
 // detection as the hook, so the skills never have to re-derive it by hand —
 // scanning stays in the script instead of streaming through the conversation.
+//
+// This dispatch has to sit *here*, above the stdin read below — an audit has no
+// hook payload, and reading fd 0 on a TTY would hang. The consequence is that
+// module-level `let`/`const` declared after this point are in their temporal
+// dead zone during an audit: anything `runAudit` reaches (directly or through
+// the functions it calls) must be declared above this line. That is why the
+// mutable caches live up with `findings`/`suppressed` rather than beside the
+// functions that use them.
 if (process.argv.slice(2).includes('--audit')) {
   runAudit()
   process.exit(0)
@@ -695,11 +778,13 @@ function checkTrackedFiles(): void {
 function checkStagedContent(): string[] {
   const staged = lines(git(['diff', '--cached', '--name-only', '--diff-filter=ACM']))
   const delegated = staged.length > 0 && gitleaksStagedScan()
-  if (!delegated) {
-    for (const file of staged) {
-      if (SCAN_SKIP_RE.test(file)) continue
-      scanContent(git(['show', `:${file}`]), `staged file ${file}`, file)
+  for (const file of staged) {
+    if (SCAN_SKIP_RE.test(file)) continue
+    if (isGitlink(file)) {
+      markUnscanned(file)
+      continue
     }
+    if (!delegated) scanContent(git(['show', `:${file}`]), `staged file ${file}`, file)
   }
   return staged
 }
@@ -717,7 +802,7 @@ if (isCommit && git(['rev-parse', '--is-inside-work-tree']) === 'true') {
 
 // What `npm pack` would put in the tarball, for the package rooted at `dir`.
 // --ignore-scripts keeps prepare/prepack output from corrupting the JSON
-// (npm/cli#7354); the leading-[ slice is a second guard for the same bug.
+// (npm/cli#7354); the leading-{ slice is a second guard for the same bug.
 function packFiles(dir: string): string[] {
   try {
     const raw = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
@@ -725,10 +810,11 @@ function packFiles(dir: string): string[] {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore']
     })
-    const jsonStart = raw.indexOf('[')
+    const jsonStart = raw.indexOf('{')
     if (jsonStart < 0) return []
-    const packInfo: Array<{ files?: Array<{ path: string }> }> = JSON.parse(raw.slice(jsonStart))
-    return (packInfo[0]?.files ?? []).map((f) => f.path)
+    // { "<pkg name>": { files: [{ path }, …] }, … } — one entry per packed package.
+    const parsed: Record<string, { files?: Array<{ path: string }> }> = JSON.parse(raw.slice(jsonStart))
+    return Object.values(parsed).flatMap((r) => (r?.files ?? []).map((f) => f.path))
   } catch {
     return [] // pack failed (private package, no package.json, …) → nothing to check
   }
@@ -736,7 +822,20 @@ function packFiles(dir: string): string[] {
 
 // `label` prefixes findings when several packages are audited in one run.
 function checkPackage(dir: string, label: string): void {
+  const tooOld = npmTooOld()
+  if (tooOld) {
+    // Identical string for every package, so it is reported once, not per-package.
+    markUnscanned(tooOld)
+    return
+  }
   const tarballFiles = packFiles(dir)
+  if (tarballFiles.length === 0) {
+    // A tarball always contains at least package.json, so an empty list means
+    // pack failed or its output was unreadable — the package was not checked.
+    // Silence here would be indistinguishable from a clean package.
+    markUnscanned(`${dir === '.' ? './' : dir} (npm pack produced no file list)`)
+    return
+  }
   const nonBuild = tarballFiles.filter((f) => NON_BUILD_RE.test(f) && !NON_BUILD_EXCEPTIONS.test(f) && !packAllowed(f))
   if (nonBuild.length > 0) {
     const shown = nonBuild.slice(0, 8).join(', ')
@@ -806,16 +905,25 @@ function runAudit(): void {
   )
 
   const report = ['GATEKEEPER AUDIT', `scope: ${scope.join('; ')}`]
+  // Emitted after every check has run, so a skip recorded during the package
+  // pass lands here too — a narrowed scan must never read as a clean one.
+  if (unscanned.length > 0) {
+    report.push(`not scanned: ${unscanned.length}`)
+    for (const u of unscanned) report.push(`  - ${u}`)
+  }
   report.push(findings.length > 0 ? `findings: ${findings.length}` : 'findings: none')
   for (const f of findings) report.push(`  - ${f}`)
   if (suppressed.length > 0) {
     report.push(`suppressed by .claude/gatekeeper.json: ${suppressed.length}`)
     for (const s of suppressed) report.push(`  - ${s}`)
   }
+  // "No findings" only means "clean" if everything was actually looked at.
   report.push(
     findings.length > 0
       ? 'The commit/publish hook enforces these same checks, so fix them before committing or publishing.'
-      : 'Clean — the commit/publish hook will not block on these checks.'
+      : unscanned.length > 0
+        ? `No findings, but ${unscanned.length} item(s) above went unscanned — not a clean bill of health until each is accounted for.`
+        : 'Clean — the commit/publish hook will not block on these checks.'
   )
   console.log(report.join('\n'))
 }
@@ -843,16 +951,18 @@ if (findings.length > 0) {
   process.exit(2)
 }
 
-// Allowed — but if allowlist entries suppressed findings, say so out loud. A
-// silent suppression would defeat the point of a review-visible allowlist.
+// Allowed — but if the scan was narrowed, say so out loud. A silent suppression
+// would defeat the point of a review-visible allowlist, and a silently skipped
+// path would let a narrowed scan read as a clean one.
+const notes: string[] = []
 if (suppressed.length > 0) {
   const shown = suppressed.slice(0, 5).join('; ')
   const more = suppressed.length > 5 ? `; …and ${suppressed.length - 5} more` : ''
-  console.log(
-    JSON.stringify({
-      systemMessage: `Gatekeeper: ${suppressed.length} finding(s) suppressed by .claude/gatekeeper.json — ${shown}${more}`
-    })
-  )
+  notes.push(`${suppressed.length} finding(s) suppressed by .claude/gatekeeper.json — ${shown}${more}`)
 }
+if (unscanned.length > 0) {
+  notes.push(`${unscanned.length} path(s) not scanned (submodule or unreadable): ${unscanned.join(', ')}`)
+}
+if (notes.length > 0) console.log(JSON.stringify({ systemMessage: `Gatekeeper: ${notes.join('. ')}` }))
 
 process.exit(0)

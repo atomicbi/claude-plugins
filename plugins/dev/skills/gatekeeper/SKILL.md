@@ -19,6 +19,12 @@ gatekeeper --audit
 
 One command, one compact report. It runs the same checks as the hook, across the whole workspace: sensitive files tracked in git, secrets in outgoing changes (staged, unstaged, and untracked), and `npm pack` contents plus a secret scan of every non-private package. It always exits 0 — it reports, it never gates.
 
+**A missing report is not a clean report.** If the output has no `GATEKEEPER AUDIT` header, the audit did not run — treat it as an unrun gate, not a pass. Likewise a `not scanned:` section lists what the audit could not cover; judge each entry rather than reading past it:
+
+- a **submodule** gitlink — expected, and correct: its contents belong to another repository and get their own gatekeeper run when committed there
+- an **unreadable path**, or a package `npm pack` produced no file list for — that check did not happen; find out why
+- **`npm … is too old`** — the tarball check needs npm ≥ 12; no package in the workspace was checked until it's upgraded (`npm install -g npm@latest`)
+
 Do not re-run these checks by hand. Hand-rolled `git ls-files | grep`, per-package `npm pack` loops, and pattern greps pull the entire scan through the conversation to reproduce a result the script already has.
 
 ## 2. Interpret and fix

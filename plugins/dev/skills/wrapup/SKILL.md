@@ -78,6 +78,8 @@ gatekeeper --audit
 
 Findings here are **blocking** — fix them (or get explicit user sign-off on false positives) before proceeding to commit. If a real secret was already committed, tell the user to rotate it; removing it from git does not un-leak it.
 
+No `GATEKEEPER AUDIT` header in the output means the gate did not run — say so and resolve it; do not proceed as if it passed. A `not scanned:` section lists what the audit could not cover: submodule gitlinks are expected (they get their own run in their own repo), but an unreadable path or an `npm … is too old` line means a check was skipped — surface it rather than reading past it.
+
 Do not hand-roll these checks (`git ls-files | grep`, per-package `npm pack` loops, pattern greps) — the script already does them, and reproducing it by hand pulls the whole scan through the conversation. Load the `gatekeeper` skill only when a finding actually needs remediation or judgment; a clean report needs nothing further.
 
 ### 5. Update Docs
