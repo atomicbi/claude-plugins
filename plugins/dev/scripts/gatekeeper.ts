@@ -45,7 +45,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync, existsSync, statSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 interface HookPayload {
   tool_input?: { command?: string }
@@ -64,9 +64,9 @@ interface GitleaksLeak {
 }
 
 // One allowlist entry from `.claude/gatekeeper.json`. `path` (a glob relative
-// to the repo/package root) and a non-empty `reason` are mandatory; an entry
-// missing either grants nothing (fail closed). What it allows is inferred from
-// which field is present:
+// to the directory holding that config's `.claude/`) and a non-empty `reason`
+// are mandatory; an entry missing either grants nothing (fail closed). What it
+// allows is inferred from which field is present:
 //   rule           → suppress that secret rule (id, list, or '*') for the path
 //   pack: true     → let the path ship in a publish tarball (non-build check)
 //   sensitiveFile  → let the path be tracked in git despite the sensitive-file
@@ -78,6 +78,13 @@ interface AllowEntry {
   pack?: boolean
   sensitiveFile?: boolean
 }
+
+// An entry plus the directory whose `.claude/gatekeeper.json` declared it.
+// Globs resolve against that root, so a config always uses the paths you would
+// see sitting next to it: repo-relative at the repo root, package-relative in a
+// package. Without it a monorepo could not scope an exception to one package —
+// the checks feed paths in whichever base they happen to hold.
+type LoadedEntry = AllowEntry & { root: string }
 
 // --- Rules -------------------------------------------------------------------
 
@@ -458,14 +465,14 @@ function isGitlink(path: string): boolean {
 
 // Loaded after chdir. Kept in `.claude/` (not the repo root) at the user's
 // request; committed and therefore reviewable — the diff is the audit trail.
-let allowlist: AllowEntry[] = []
+let allowlist: LoadedEntry[] = []
 
-function loadAllowlist(): AllowEntry[] {
+function loadAllowlist(): LoadedEntry[] {
   const roots = new Set<string>()
   const top = git(['rev-parse', '--show-toplevel'])
-  if (top) roots.add(top)
+  if (top) roots.add(resolve(top))
   roots.add(process.cwd()) // publish runs from the package dir, which may differ
-  const entries: AllowEntry[] = []
+  const entries: LoadedEntry[] = []
   for (const root of roots) {
     const file = join(root, '.claude', 'gatekeeper.json')
     if (!existsSync(file)) continue
@@ -476,7 +483,7 @@ function loadAllowlist(): AllowEntry[] {
         // A path and a non-empty reason are mandatory. Anything else grants
         // nothing — a malformed entry can only fail closed, never open.
         if (e && typeof e.path === 'string' && typeof e.reason === 'string' && e.reason.trim()) {
-          entries.push(e)
+          entries.push({ ...e, root }) // `root` last: a `root` key in the JSON grants nothing
         }
       }
     } catch {} // unreadable/invalid config → no allowances (fail closed)
@@ -507,9 +514,15 @@ function globToRe(glob: string): RegExp {
   return new RegExp(`^${re}$`)
 }
 
-function pathMatches(entry: AllowEntry, path: string): boolean {
+// Every path the checks produce is relative to the process cwd; every glob is
+// relative to its entry's root. Re-base the path onto that root before testing,
+// and refuse anything that escapes it — an entry can never reach outside the
+// tree its config governs.
+function pathMatches(entry: LoadedEntry, path: string): boolean {
+  const rel = relative(entry.root, resolve(path))
+  if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return false
   try {
-    return globToRe(entry.path).test(path)
+    return globToRe(entry.path).test(rel)
   } catch {
     return false
   }
@@ -836,7 +849,12 @@ function checkPackage(dir: string, label: string): void {
     markUnscanned(`${dir === '.' ? './' : dir} (npm pack produced no file list)`)
     return
   }
-  const nonBuild = tarballFiles.filter((f) => NON_BUILD_RE.test(f) && !NON_BUILD_EXCEPTIONS.test(f) && !packAllowed(f))
+  // `npm pack` lists package-relative paths; the allowlist (like every other
+  // check) works in cwd-relative ones, so re-base before asking it.
+  const inCwd = (f: string): string => (dir === '.' ? f : join(dir, f))
+  const nonBuild = tarballFiles.filter(
+    (f) => NON_BUILD_RE.test(f) && !NON_BUILD_EXCEPTIONS.test(f) && !packAllowed(inCwd(f))
+  )
   if (nonBuild.length > 0) {
     const shown = nonBuild.slice(0, 8).join(', ')
     const more = nonBuild.length > 8 ? ', …' : ''
@@ -847,7 +865,7 @@ function checkPackage(dir: string, label: string): void {
 
   // Secrets in files about to be published (npm ignores .gitignore!)
   for (const file of tarballFiles) {
-    scanWorkingTreeFile(dir === '.' ? file : join(dir, file), `${label}file to be published: ${file}`)
+    scanWorkingTreeFile(inCwd(file), `${label}file to be published: ${file}`)
   }
 }
 

@@ -56,6 +56,8 @@ A committed, review-visible allowlist for exceptions that inline `gitleaks:allow
 
 Each entry is `{ path, reason, … }`. **Both `path` (a glob) and a non-empty `reason` are mandatory — a malformed entry grants nothing (fail closed).** The allowed action is inferred from the field present: `sensitiveFile: true` (track a sensitive file), `rule` (a secret-rule id, list, or `"*"` — suppress for the path), `pack: true` (ship a non-build file). Globs: `*`/`?` stay within a segment, `**` spans separators; no brace/bracket expansion (patterns are meant to be narrow).
 
+**Globs resolve against the directory holding that config's `.claude/`**, so a config is written in the paths you would see sitting next to it — repo-relative at the top level, package-relative inside a package — and an entry can never match outside its own root. That last property is what makes loading two configs safe. It was also a bug for one release: `npm pack` reports package-relative paths and `checkPackage` passed them straight to the pack check, so the documented repo-relative form (`packages/sdk/src/**`) matched nothing in a workspace, while the secret check one line below was already re-basing to repo-relative. Carrying the root on each loaded entry is what keeps every check honest about which base a path is in.
+
 Trust model (the user's explicit concern was a bad actor planting exceptions):
 
 - **Committed ⇒ reviewable.** Every entry lands in a diff — the same trust model as inline `gitleaks:allow`. That review is the primary guard.
@@ -84,6 +86,6 @@ Native TypeScript via Node type stripping: **Node ≥ 22.18**, erasable syntax o
 
 ## Testing
 
-`pnpm test` → `tests/gatekeeper.test.ts` (38 cases: staged/predicted-staging/tracked-file/inline-allow/lockfile-skip/bypass/publish matrix, command classification in both directions, `--audit` mode across a workspace, `.npmrc` content-awareness, the `.claude/gatekeeper.json` allowlist — sensitiveFile/rule/pack and fail-closed on a malformed entry — four submodule cases asserting the audit still prints a report, still finds secrets elsewhere, and names the gitlink as unscanned, and two npm-floor cases driven by a stub `npm` first on `PATH`). Assertions target decisions, not finding text, so they pass with or without gitleaks installed.
+`pnpm test` → `tests/gatekeeper.test.ts` (41 cases: staged/predicted-staging/tracked-file/inline-allow/lockfile-skip/bypass/publish matrix, command classification in both directions, `--audit` mode across a workspace, `.npmrc` content-awareness, the `.claude/gatekeeper.json` allowlist — sensitiveFile/rule/pack, fail-closed on a malformed entry, and three root-scoping cases asserting a repo-root entry reaches one workspace package from both the audit and a publish run inside it while a sibling stays blocked — four submodule cases asserting the audit still prints a report, still finds secrets elsewhere, and names the gitlink as unscanned, and two npm-floor cases driven by a stub `npm` first on `PATH`). Assertions target decisions, not finding text, so they pass with or without gitleaks installed.
 
 The classification cases work by fixture, not by inspecting internals: the repo they run in has no `files` whitelist, so a command misread as a publish denies with a packaging finding while a correctly-read commit stays clean.

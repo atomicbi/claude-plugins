@@ -506,3 +506,53 @@ test('allowlist: pack entry permits an intentionally shipped src/', inRepo((repo
   assert.equal(res.denied, false)
   assert.equal(res.code, 0)
 }))
+
+// Two packages that both pack their src/, so each contributes a non-build
+// finding an allowlist entry could suppress.
+function twoPackableRepo(repo: string): void {
+  for (const name of ['a', 'b']) {
+    mkdirSync(join(repo, 'packages', name, 'src'), { recursive: true })
+    mkdirSync(join(repo, 'packages', name, 'dist'), { recursive: true })
+    writeFileSync(join(repo, 'packages', name, 'src', 'index.ts'), 'export {}\n')
+    writeFileSync(join(repo, 'packages', name, 'dist', 'index.js'), 'module.exports = {}\n')
+    writeFileSync(
+      join(repo, 'packages', name, 'package.json'),
+      JSON.stringify({ name: `pkg-${name}`, version: '1.0.0', main: 'dist/index.js' })
+    )
+  }
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'root', version: '0.0.0', private: true }))
+  git(repo, 'add', '-A')
+}
+
+// The regression: `npm pack` reports package-relative paths, so a repo-root
+// entry written the documented way (`packages/a/src/**`) used to match nothing.
+test('allowlist: a repo-root pack entry scopes to one package in a workspace', inRepo((repo) => {
+  twoPackableRepo(repo)
+  writeAllow(repo, { allow: [{ path: 'packages/a/src/**', pack: true, reason: 'ships TS sources for consumers' }] })
+  const res = runAudit(repo)
+  assert.doesNotMatch(res.out, /pkg-a@1\.0\.0: package tarball/)
+  assert.match(res.out, /pkg-b@1\.0\.0: package tarball contains 1 non-build file/)
+  assert.match(res.out, /suppressed by \.claude\/gatekeeper\.json: 1/)
+  assert.match(res.out, /packaged packages\/a\/src\/index\.ts/)
+}))
+
+// Same entry, the other entry point: publishing from the package dir, where
+// `npm pack` paths are package-relative but the repo-root config is not.
+test('allowlist: a repo-root pack entry applies to a publish run from the package dir', inRepo((repo) => {
+  twoPackableRepo(repo)
+  writeAllow(repo, { allow: [{ path: 'packages/a/src/**', pack: true, reason: 'ships TS sources' }] })
+  assert.equal(runHook(join(repo, 'packages', 'a'), 'npm publish').denied, false)
+  // …and grants pkg-b nothing, even though its tarball has the same shape.
+  assert.equal(runHook(join(repo, 'packages', 'b'), 'npm publish').denied, true)
+}))
+
+// A package-local config is read when the publish runs there, and is written in
+// its own terms — it can never reach outside the tree it sits in.
+test('allowlist: a package-local pack entry is package-relative', inRepo((repo) => {
+  twoPackableRepo(repo)
+  const pkgA = join(repo, 'packages', 'a')
+  writeFileSync(join(pkgA, '.npmignore'), '.claude\n')
+  writeAllow(pkgA, { allow: [{ path: 'src/**', pack: true, reason: 'ships TS sources' }] })
+  assert.equal(runHook(pkgA, 'npm publish').denied, false)
+  assert.equal(runHook(join(repo, 'packages', 'b'), 'npm publish').denied, true)
+}))

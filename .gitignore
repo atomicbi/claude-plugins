@@ -1,2 +1,5 @@
 node_modules/
 _docs/
+.roam/
+.silktree/
+.DS_Store
