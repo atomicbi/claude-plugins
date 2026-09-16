@@ -1,0 +1,28 @@
+{
+  "name": "dev",
+  "version": "1.6.1",
+  "description": "Developer workflow skills for secure releases and session wrap-up.",
+  "author": {
+    "name": "Atomic BI",
+    "url": "https://github.com/atomicbi"
+  },
+  "homepage": "https://github.com/atomicbi/claude-plugins",
+  "repository": "https://github.com/atomicbi/claude-plugins",
+  "license": "MIT",
+  "keywords": ["development", "security", "release", "git"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Atomic BI Dev",
+    "shortDescription": "Security and release-workflow skills for developers.",
+    "longDescription": "Run a focused security and packaging audit or guide a coding session through validation, documentation, commit, version, and push steps.",
+    "developerName": "Atomic BI",
+    "category": "Development",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://github.com/atomicbi/claude-plugins",
+    "defaultPrompt": [
+      "Audit this project for leaked secrets and package hygiene.",
+      "Wrap up this coding session and prepare a safe commit."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

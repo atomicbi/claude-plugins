@@ -1,8 +1,6 @@
 ---
 name: gatekeeper
 description: Security and packaging audit before commit, push, or publish. Use when the gatekeeper hook blocks a command, before publishing a package, or when the user asks to check for leaked secrets or audit package contents.
-model: sonnet
-effort: medium
 ---
 
 # Gatekeeper
@@ -15,7 +13,7 @@ Deep audit companion to the gatekeeper hook. `scripts/gatekeeper.ts` owns *detec
 gatekeeper --audit
 ```
 
-(The dev plugin's `bin/` is on PATH automatically. If the command isn't found — live-tree development, or an older install — run `node <this skill's base dir>/../../scripts/gatekeeper.ts --audit`.)
+In Claude Code, the plugin's `bin/` directory puts `gatekeeper` on PATH automatically. In Codex, run this command when the executable is available in the current project or PATH; Codex plugins do not install Claude's automatic command hook or guarantee that `bin/` is on PATH. If it is unavailable, say that the automated audit cannot run and do not recreate its secret or package scans with ad-hoc shell commands.
 
 One command, one compact report. It runs the same checks as the hook, across the whole workspace: sensitive files tracked in git, secrets in outgoing changes (staged, unstaged, and untracked), and `npm pack` contents plus a secret scan of every non-private package. It always exits 0 — it reports, it never gates.
 

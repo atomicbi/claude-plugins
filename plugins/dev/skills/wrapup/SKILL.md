@@ -5,14 +5,14 @@ description: Session/feature wrap-up workflow. Use when finishing work, wrapping
 
 # Wrapup
 
-Structured wrap-up for coding sessions. Cleans up, validates, documents, commits, and optionally versions/publishes — guided by per-project config stored in CLAUDE.md.
+Structured wrap-up for coding sessions. Cleans up, validates, documents, commits, and optionally versions/publishes — guided by per-project config stored in `CLAUDE.md` or `AGENTS.md`.
 
 ## Process
 
 ```
-/wrapup invoked
+wrapup invoked
     │
-    ├── Config found in CLAUDE.md?
+    ├── Config found in a project instruction file?
     │   ├── No  → Run INIT FLOW (below)
     │   └── Yes → Load config
     │
@@ -30,7 +30,7 @@ Structured wrap-up for coding sessions. Cleans up, validates, documents, commits
 
 ## Init Flow
 
-If the project's CLAUDE.md has no `## Wrapup Config` section, follow [reference/init-flow.md](reference/init-flow.md) first — auto-detect, confirm with the user, write the config — then continue with the workflow below in the same invocation. If the config already exists, skip that file entirely; everything below reads from the config.
+If the project's `CLAUDE.md` or `AGENTS.md` has no `## Wrapup Config` section, follow [reference/init-flow.md](reference/init-flow.md) first — auto-detect, confirm with the user, write the config in the project's existing instruction file — then continue with the workflow below in the same invocation. If the config already exists, skip that file entirely; everything below reads from the config.
 
 ## Step-by-Step Workflow
 
@@ -86,9 +86,9 @@ Do not hand-roll these checks (`git ls-files | grep`, per-package `npm pack` loo
 
 Based on the configured `docs` strategy:
 
-- **Single CLAUDE.md**: Update if architectural patterns, commands, or project structure changed
-- **docs/ folder**: Update relevant docs if the changes affect documented architecture. Add new docs for significant new patterns. Keep CLAUDE.md as an index/overview.
-- **Monorepo per-package docs/**: Update the specific package's docs. Keep root CLAUDE.md inventory current.
+- **Single instruction file (`CLAUDE.md` or `AGENTS.md`)**: Update if architectural patterns, commands, or project structure changed
+- **docs/ folder**: Update relevant docs if the changes affect documented architecture. Add new docs for significant new patterns. Keep the project instruction file as an index/overview.
+- **Monorepo per-package docs/**: Update the specific package's docs. Keep the root instruction-file inventory current.
 
 Only update docs for meaningful architectural or behavioral changes. Bug fixes and minor tweaks don't need doc updates. When in doubt, skip — don't create noise.
 

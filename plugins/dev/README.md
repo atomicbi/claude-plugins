@@ -1,6 +1,6 @@
 # dev
 
-Developer workflow skills for Claude Code.
+Developer workflow skills for Claude Code and Codex.
 
 ## Skills
 
@@ -35,6 +35,19 @@ Requirements & behavior notes:
 
 ## Installation
 
+### Claude Code
+
 ```
 /plugin install dev@atomicbi
 ```
+
+### Codex
+
+From a clone of this repository:
+
+```bash
+codex plugin marketplace add .
+codex plugin add dev@atomicbi
+```
+
+Codex loads the skills but does not consume the Claude Code hook manifest or automatically add this plugin's `bin/` directory to PATH. Use `gatekeeper --audit` only when that executable is otherwise available; the wrapup skill remains fully interactive.
